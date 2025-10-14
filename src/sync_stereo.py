@@ -1,6 +1,6 @@
 import subprocess
 import argparse
-# import cv2 as cv
+import cv2 as cv
 
 # Argumentos de la línea de comandos
 parser = argparse.ArgumentParser(description='Sincronizar dos vídeos estéreo')
@@ -34,7 +34,7 @@ def adjust_video_offset(video_file_1, video_file_2, offset, output_file, separat
             '-filter_complex', '[0:v][1:v]vstack=inputs=2[v]',  # Superponer los vídeos verticalmente
             '-map', '[v]',  # Mapear el vídeo compuesto
             '-y',            # Sobrescribir archivo de salida si ya existe        
-            '-r', '60', # str(cv.VideoCapture(video_file_1).get(cv.CAP_PROP_FPS)), # Usar fps del primer vídeo
+            '-r', str(cv.VideoCapture(video_file_1).get(cv.CAP_PROP_FPS)), # Usar fps del primer vídeo
             '-vsync', '2',  # Evitar la duplicación de frames
             '-c:v', 'libx264',  # Codec de vídeo
             '-c:a', 'aac',      # Codec de audio
