@@ -8,12 +8,11 @@ parser = argparse.ArgumentParser(usage=
 """
 usage: select_points.py [-h] -i INPUT [-f FRAME] [-o OUTPUT] [-a]
 
-Este script permite seleccionar puntos en un frame seleccionado de un vídeo y mostrar sus coordenadas haciendo clic.
-Es útil para obtener las coordenadas de la bola y usarlas para el prompt de SAM2.
+Este script permite seleccionar frames de un vídeo y guardar el resultado en un archivo de texto.
+Es útil para seleccionar los frames válidos de un conjunto de entrenamiento obtenido mediante destilación de un modelo profesor como SAM2.
 Controles: 
-    - Clic izquierdo: seleccionar punto dentro del contorno (verde)
-    - Clic central: seleccionar punto fuera del contorno (rojo)
-    - Tecla 's': guardar el punto seleccionado en un archivo de texto
+    - Tecla 's': seleccionar el frame actual
+    - Tecla 'w': rechazar el frame actual
     - Tecla 'a': retroceder un frame
     - Tecla 'd': avanzar un frame
     - Tecla 'r': retroceder 10 frames
@@ -21,13 +20,13 @@ Controles:
     - Tecla 'q': salir del programa
 
 Formato del archivo de salida:
-    columnas: frame x y isin
-    frame es el número de frame, x e y son las coordenadas del punto seleccionado e isin es 1 si el punto está dentro del contorno y 0 si está fuera.
+    columnas: frame valid
+    frame es el número de frame y valid es 1 si el frame es válido y 0 si no.
 """)
 parser.add_argument("-i", "--input", help="Ruta al vídeo de entrada o carpeta con los frames en formato jpg y nombre 00001.jpg, 00002.jpg, etc.", required=True)
-parser.add_argument("-f", "--frame", help="Frame seleccionado del vídeo", type=int, default=0)
-parser.add_argument("-o", "--output", help="Archivo de salida para guardar los puntos", default='./points.txt')
-parser.add_argument("-a", "--append", help="Añadir al archivo de salida en lugar de sobrescribirlo", action='store_true')
+parser.add_argument("-f", "--frame", help="Frame inicial para la selección", type=int, default=0)
+parser.add_argument("-o", "--output", help="Archivo de salida para guardar los puntos", default='./frames.txt')
+parser.add_argument("-a", "--all", help="Inicialmente selecciona todos los frames", action='store_true')
 
 args = parser.parse_args()
 
@@ -65,68 +64,47 @@ else:
             cv.putText(frame, f"Frame {nframe}/{frame_count}", (10, 30), cv.FONT_HERSHEY_PLAIN, 2, (0, 0, 0), 2)
         return frame if frame is not None else None
 
+selected_frames = np.zeros(frame_count, dtype=np.uint8) if not args.all else np.ones(frame_count, dtype=np.uint8)
 frame = extract_frame(args.input, args.frame)
 
 if frame is not None:
-    point = np.array([-1, -1])
-    points = []
-    isin = True
     cv.namedWindow("window")
     cv.imshow("window", frame)
-    def manejador(event, x, y, flags, param):
-        global point, frame, isin
-        output = frame
-        if event == cv.EVENT_LBUTTONDOWN or event == cv.EVENT_MBUTTONDOWN:
-            point = np.array([x, y])
-            isin = (event == cv.EVENT_LBUTTONDOWN)
-            # print(f"({point[0]}, {point[1]})")
-            output = frame.copy()
-            cv.circle(output, (point[0], point[1]), 2, (0, 255, 0) if isin else (0, 0, 255), 3)
-            cv.putText(output, f"({point[0]}, {point[1]})", (point[0], point[1]), cv.FONT_HERSHEY_PLAIN, 2, (0, 0, 0), 2)
-            cv.imshow("window", output)
-
     def manejador_tecla(key):
-        global point, frame, isin
-        if key & 0xFF == ord('s'):  # Escribir el punto seleccionado
-            if point[0] >= 0 and point[1] >= 0:
-                print(f"{args.frame}: ({point[0]}, {point[1]}) {'1' if isin else '0'}")
-                points.append((args.frame, point[0], point[1], 1 if isin else 0))
+        global frame, selected_frames
+        if key & 0xFF == ord('s') or key & 0xFF == ord('w') or key & 0xFF == ord('d'):  # Avanzar un frame
+            if key & 0xFF == ord('s'):
+                selected_frames[args.frame] = 1
+            elif key & 0xFF == ord('w'):
+                selected_frames[args.frame] = 0
+            args.frame = (args.frame + 1) % frame_count
+            frame = extract_frame(args.input, args.frame)
+            frame = cv.circle(frame, (10, 60), 10, (0, 255, 0), -1) if selected_frames[args.frame] == 1 else cv.circle(frame, (10, 60), 10, (0, 0, 255), -1)
+            cv.imshow("window", frame)
         elif key & 0xFF == ord('a'):  # Retroceder un frame
             args.frame = (frame_count + args.frame - 1) % frame_count
             frame = extract_frame(args.input, args.frame)
-            point = np.array([-1, -1])
-            cv.imshow("window", frame)
-        elif key & 0xFF == ord('d'):  # Avanzar un frame
-            args.frame = (args.frame + 1) % frame_count
-            frame = extract_frame(args.input, args.frame)
-            point = np.array([-1, -1])
+            frame = cv.circle(frame, (10, 60), 10, (0, 255, 0), -1) if selected_frames[args.frame] == 1 else cv.circle(frame, (10, 60), 10, (0, 0, 255), -1)
             cv.imshow("window", frame)
         elif key & 0xFF == ord('f'):  # Avanzar 10 frames
             args.frame = (args.frame + 10) % frame_count
             frame = extract_frame(args.input, args.frame)
-            point = np.array([-1, -1])
+            frame = cv.circle(frame, (10, 60), 10, (0, 255, 0), -1) if selected_frames[args.frame] == 1 else cv.circle(frame, (10, 60), 10, (0, 0, 255), -1)
             cv.imshow("window", frame)
         elif key & 0xFF == ord('r'):  # Retroceder 10 frames
             args.frame = (frame_count + args.frame - 10) % frame_count
             frame = extract_frame(args.input, args.frame)
-            point = np.array([-1, -1])
+            frame = cv.circle(frame, (10, 60), 10, (0, 255, 0), -1) if selected_frames[args.frame] == 1 else cv.circle(frame, (10, 60), 10, (0, 0, 255), -1)
             cv.imshow("window", frame)
-    cv.setMouseCallback("window", manejador)
     key = cv.waitKey(0)
     while key & 0xFF != ord('q'):
         manejador_tecla(key)
         key = cv.waitKey(0)
 
-    # Guardar los puntos en un archivo
-    if len(points) > 0:
-        with open(args.output, 'a' if args.append else 'w') as f:
-            if not args.append:
-                f.write("frame x y isin\n")
-            for p in points:
-                f.write(f"{p[0]} {p[1]} {p[2]} {p[3]}\n")
-        converted_output = os.path.splitext(args.output)[0] + '.py'
-        convert_points(args.output, converted_output)
-        print(f"Puntos guardados en {args.output}")
+    # Guardar los frames seleccionados en un archivo
+    with open(args.output, 'w') as f:
+        for i in range(frame_count):
+            f.write(f"{i} {selected_frames[i]}\n")
     cv.destroyAllWindows()
 
 else:
