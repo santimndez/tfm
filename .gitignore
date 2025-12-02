@@ -2,3 +2,5 @@ __pycache__/
 *.jpg
 *.txt
 *.mp4
+*.csv
+results/
