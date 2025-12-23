@@ -122,43 +122,66 @@ def draw_polyline(frame, points, color=(0, 255, 255), thickness=2):
         frame = cv.circle(frame, pt, 3, color, -1)
     return frame
 
-def extract_frame(input, nframe=0, frame_count=100, point=None, line=None, putText=True, mframe=None, distance=None, poly=None):
+def transform_frame(frame, nframe=0, frame_count=100, point=None, line=None, putText=True, mframe=None, distance=None, poly=None):
     global zoom
-    # Cargar el video
-    video = cv.VideoCapture(input)
-    # video.set(cv.CAP_PROP_POS_FRAMES, nframe)
-    # success, frame = video.read()
-    for _ in range(nframe + 1):
-        success, frame = video.read()
-        if not success:
-            break
-    if success and putText:
+    if putText:
         frame = cv.putText(frame, f"Frame {nframe}/{frame_count}", (10, 30), cv.FONT_HERSHEY_PLAIN, 2, (0, 0, 0), 2)
         if mframe is not None:
             frame = cv.putText(frame, f"->{mframe}", (410, 30), cv.FONT_HERSHEY_PLAIN, 2, (0, 0, 0), 2)
         if distance is not None:
             frame = cv.putText(frame, f"d={distance:.2f} px", (910, 30), cv.FONT_HERSHEY_PLAIN, 2, (0, 0, 0), 2)
-    if success and point is not None:
-        frame = cv.circle(frame, (int(point[0]), int(point[1])), 5, (0, 255, 0), -1)
-    if success and line is not None:
+    if line is not None:
         frame = draw_line(frame, line, color=(255, 0, 0), thickness=2)
     if poly is not None:
         frame = draw_polyline(frame, poly[:2, :], color=(0, 255, 255), thickness=2)
+    if point is not None:
+        frame = cv.circle(frame, (int(point[0]), int(point[1])), 5, (0, 255, 0), -1)
     if zoom != 1.0: 
         width, height = int(frame.shape[1] * zoom), int(frame.shape[0] * zoom)
         frame = cv.resize(frame, (width, height), interpolation=cv.INTER_CUBIC)
-    # Liberar el video      
-    video.release()
 
-    return frame if success else None
+    return frame
 
-frame_count = [get_frame_count(args.input[0]), get_frame_count(args.input[1])]
-frame = [extract_frame(args.input[0], 0, frame_count[0]), extract_frame(args.input[1], 0, frame_count[1])]
+videos = [cv.VideoCapture(input) for input in args.input]
+frame_count = [int(video.get(cv.CAP_PROP_FRAME_COUNT)) for video in videos]
 idx = [0, 0]  # Índices de los frames actuales
+old_idx = [0, 0]  # Índices de los frames anteriores
+frame = [None, None]
+for i in range(2):
+    success, temp_frame = videos[i].read()
+    if success:
+        frame[i] = transform_frame(temp_frame, 0, frame_count[i])
 poly = False  # Para mostrar polígono considerado al calcular la correspondencia local
 thres = 10
 fps_ratio = fps[1] / fps[0]
 offset = -40 # Desfase a priori en frames (entero)
+
+def get_frame(nvideo):
+    # Obtiene el frame del vídeo 1 o 2 correspondiente. Evita repetir la carga del vídeo.
+    global videos, frame_count, frame, old_idx
+    nframe = (idx[nvideo] + frame_count[nvideo]) % frame_count[nvideo]
+    if nframe>old_idx[nvideo]:
+        for f in range(old_idx[nvideo]+1, nframe+1):
+            success, frame[nvideo] = videos[nvideo].read()
+            if not success:
+                return None
+    elif nframe<old_idx[nvideo]:
+        videos[nvideo] = cv.VideoCapture(video_files[nvideo])
+        for f in range(nframe+1):
+            success, frame[nvideo] = videos[nvideo].read()
+            if not success:
+                return None
+    idx[nvideo] = nframe
+    old_idx[nvideo] = nframe
+    return frame[nvideo]
+
+def get_tframe(nvideo, point=None, line=None, putText=True, mframe=None, distance=None, poly=None):
+    # Obtiene el frame transformado del vídeo 1 o 2 correspondiente
+    temp_frame = get_frame(nvideo)
+    if temp_frame is not None:
+        return transform_frame(temp_frame, idx[nvideo], frame_count[nvideo], point, line, putText, mframe, distance, poly)
+    else:
+        return None
 
 if frame[0] is not None and frame[1] is not None:
     cv.namedWindow("window")
@@ -195,15 +218,15 @@ if frame[0] is not None and frame[1] is not None:
                 epiline = epilines[idx[0], :] if homog_points1[2, idx[0]] != 0 else None
                 point1 = homog_points2[:, idx[1]] if homog_points2[2, idx[1]] != 0 else None
                 distance = distance_point_to_line(homog_points2[:, idx[1]][:, np.newaxis], epiline[np.newaxis, :])[0] if (epiline is not None and point1 is not None) else None
-                frame[0] = extract_frame(args.input[0], idx[0], frame_count[0], point=point0, line=epiline0, distance=distance)
-                frame[1] = extract_frame(args.input[1], idx[1], frame_count[1], point=point1, line=epiline)
-                cv.imshow("window", np.hstack((frame[0], frame[1])))
+                tframe0 = get_tframe(0, point=point0, line=epiline0, distance=distance)
+                tframe1 = get_tframe(1, point=point1, line=epiline)
+                cv.imshow("window", np.hstack((tframe0, tframe1)))
     else:
         df = pd.read_csv(args.correspondences, na_values=['nan'])
         # get dictionary of correspondences
         correspondences = dict(zip(df['frame'], df['offset']))
         def manejador_tecla(key):
-            global frame, idx, frame_count, zoom, correspondences, poly, fps_ratio, offset, thres
+            global frame, idx, zoom, frame_count, correspondences, poly, fps_ratio, offset, thres
             # Vídeo 1
             if key & 0xFF == ord('s'):  # Avanzar un frame en el vídeo 1
                 idx[0] = (idx[0] + 1) % frame_count[0]
@@ -214,10 +237,10 @@ if frame[0] is not None and frame[1] is not None:
             elif key & 0xFF == ord('z'):  # Retroceder 10 frames en el vídeo 1
                 idx[0] = (idx[0] - 10 + frame_count[0]) % frame_count[0]
             
-            corr = idx[0] + correspondences.get(idx[0], np.nan)
+            corr = int(round(np.nan_to_num(idx[0] + correspondences.get(idx[0], -1), nan=-1, posinf=-1, neginf=-1)))
             if key & 0xFF in [ord('a'), ord('s'), ord('x'), ord('z')]:
-                if ~np.isnan(corr) and int(corr)>=0 and int(corr)<frame_count[1]:
-                    idx[1] = int(round(corr))
+                if corr>=0 and corr<frame_count[1]:
+                    idx[1] = corr
             # Vídeo 2
             if key & 0xFF == ord('f'):  # Avanzar un frame en el vídeo 2
                 idx[1] = (idx[1] + 1) % frame_count[1]
@@ -249,7 +272,7 @@ if frame[0] is not None and frame[1] is not None:
                         polyline0[:, d+thres] = homog_points1[:, idx[0] + d] if idx[0] + d >=0 and idx[0] + d < homog_points1.shape[1] else np.zeros((3,))
                         valid[d+thres] = homog_points1[2, idx[0] + d] > 0 if idx[0] + d >=0 and idx[0] + d < homog_points1.shape[1] else False
                     polyline0 = polyline0[:2, valid] if np.sum(valid)>0 else None
-                frame[0] = extract_frame(args.input[0], idx[0], frame_count[0], point=point0, line=epiline0, mframe=corr, distance=distance, poly=polyline0)
+                tframe0 = get_tframe(0, point=point0, line=epiline0, mframe=corr, distance=distance, poly=polyline0)
                 polyline = None
                 if poly:
                     polyline = np.zeros((3, 2*thres+1))
@@ -259,8 +282,8 @@ if frame[0] is not None and frame[1] is not None:
                         polyline[:, d+thres] = homog_points2[:, corr_idx + d] if corr_idx + d >=0 and corr_idx + d < homog_points2.shape[1] else np.zeros((3,))
                         valid[d+thres] = homog_points2[2, corr_idx + d] > 0 if corr_idx + d >=0 and corr_idx + d < homog_points2.shape[1] else False
                     polyline = polyline[:2, valid] if np.sum(valid)>0 else None
-                frame[1] = extract_frame(args.input[1], idx[1], frame_count[1], point=point1, line=epiline, poly=polyline)
-                cv.imshow("window", np.hstack((frame[0], frame[1])))
+                tframe1 = get_tframe(1, point=point1, line=epiline, poly=polyline)
+                cv.imshow("window", np.hstack((tframe0, tframe1)))
 
     key = cv.waitKey(0)
     while key & 0xFF != ord('q'):
@@ -268,3 +291,7 @@ if frame[0] is not None and frame[1] is not None:
         key = cv.waitKey(0)
 else:
     print(f"Error al leer el frame {args.frame} del video {args.input}")
+
+for video in videos:
+    video.release()
+cv.destroyAllWindows()
