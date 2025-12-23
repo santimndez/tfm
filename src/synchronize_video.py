@@ -104,7 +104,7 @@ if args.offset is not None:
     print(f'Usando desfase proporcionado: {offset} frames')
 else:
     tic = time.time()
-    offset, offset_loss = estimate_offset(F, homog_points1, homog_points2, args.max_offset)
+    offset, offset_loss = estimate_offset(F, homog_points1[:, :1800], homog_points2[:, :1800], args.max_offset)
     offset = -offset    # Cambiar el signo para que sea negativo si hay que adelantar el primer vídeo
     toc = time.time()
     print(f'Calculando desfases {args.max_offset} - Tiempo: {toc - tic:.2f} segundos')

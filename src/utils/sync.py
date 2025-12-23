@@ -68,7 +68,7 @@ def adjust_video_offset(video_file_1, video_file_2, offset, output_file, separat
     out.release()
 
 # Función para ajustar la sincronización de los vídeos según el desfase
-def adjust_video_offset_ffmpeg(video_file_1, video_file_2, offset, output_file, separated=False):
+def adjust_video_offset_ffmpeg(video_file_1, video_file_2, offset, output_file, separated=False, verbose=False):
     """
     Sincroniza dos vídeos usando ffmpeg. 
     El offset en segundos se aplica al primer vídeo (positivo para retrasarlo, negativo para adelantarlo).
@@ -97,7 +97,6 @@ def adjust_video_offset_ffmpeg(video_file_1, video_file_2, offset, output_file, 
             '-y',               # Sobrescribir archivo de salida si ya existe
             output_file         # Archivo de salida
         ]
-        subprocess.run(command)
     else:
         # Usamos ffmpeg para ajustar el desfase y guardar el primer vídeo desplazado
         filter_complex = f'[0:v]setpts=PTS-STARTPTS+({offset})/TB[v]'
@@ -113,7 +112,67 @@ def adjust_video_offset_ffmpeg(video_file_1, video_file_2, offset, output_file, 
             '-y',                       # Sobrescribir archivo de salida si ya existe
             output_file                 # Archivo de salida
         ]
-        subprocess.run(command)
+    # Verbosity: global options
+    if not verbose:
+        command[1:1] = ['-hide_banner', '-loglevel', 'error', '-nostdin']
+        run_kwargs = {'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL, 'check': True}
+    else:
+        # verbose: dejar que ffmpeg imprima a stdout/stderr y no suprimir errores (ayuda en depuración)
+        command[1:1] = ['-nostdin']
+        run_kwargs = {'check': True}
+
+    subprocess.run(command, **run_kwargs)
+
+# Función para ajustar la sincronización de los vídeos según el desfase
+def adjust_video_offset_ffmpeg(video_file_1, video_file_2, offset, output_file, separated=False, verbose=False):
+    """
+    Sincroniza dos vídeos usando ffmpeg. 
+    El offset en segundos se aplica al primer vídeo (positivo para retrasarlo, negativo para adelantarlo).
+    Si separated es True, solo se guarda el primer vídeo desplazado.
+    :param verbose: si True muestra la salida de ffmpeg, si False reduce la verbosidad.
+    """
+    # Construir filter_complex
+    if not separated:
+        filter_complex = (
+            f'[0:v]setpts=PTS-STARTPTS+({offset})/TB[v0];'
+            '[1:v]setpts=PTS-STARTPTS[v1];'
+            '[v0][v1]vstack=inputs=2[v]'
+        )
+        command = [
+            'ffmpeg',
+            '-y',
+            '-i', video_file_1,
+            '-i', video_file_2,
+            '-filter_complex', filter_complex,
+            '-map', '[v]',
+            '-map', '0:a?',
+            '-fps_mode', 'vfr',
+            '-c:v', 'libx264',
+            '-c:a', 'aac',
+            output_file
+        ]
+    else:
+        filter_complex = f'[0:v]setpts=PTS-STARTPTS+({offset})/TB[v]'
+        command = [
+            'ffmpeg',
+            '-y',
+            '-i', video_file_1,
+            '-filter_complex', filter_complex,
+            '-c:v', 'libx264',
+            '-c:a', 'aac',
+            output_file
+        ]
+
+    # Ajustar verbosidad: insertar opciones globales justo después de 'ffmpeg'
+    if not verbose:
+        command[1:1] = ['-hide_banner', '-loglevel', 'error', '-nostdin']
+        run_kwargs = {'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL, 'check': True}
+    else:
+        # verbose: dejar que ffmpeg imprima a stdout/stderr y no suprimir errores (ayuda en depuración)
+        command[1:1] = ['-nostdin']
+        run_kwargs = {'check': True}
+
+    subprocess.run(command, **run_kwargs)
 
 
 def estimate_offset(F, homog_points1, homog_points2, max_offset=600):
@@ -127,6 +186,7 @@ def estimate_offset(F, homog_points1, homog_points2, max_offset=600):
     :param max_offset: Desfase máximo a considerar (en número de frames).
     :return: Desfase estimado (en número de frames) y array con la pérdida para cada desfase.
     """
+    max_offset = min(max_offset, homog_points1.shape[1]-1, homog_points2.shape[1]-1)
     # Ampliar homog_points al mismo tamaño añadiendo ceros al final
     max_length = max(homog_points1.shape[1], homog_points2.shape[1])
     if homog_points1.shape[1] < max_length:
@@ -139,7 +199,6 @@ def estimate_offset(F, homog_points1, homog_points2, max_offset=600):
     epilines = (F @ homog_points1).T
 
     offset_loss = np.zeros((2*max_offset+1,))
-    
     for o in range(-max_offset, max_offset+1):
         # Desplazar las posiciones de la segunda cámara
         shifted_points = np.roll(homog_points2, o, axis=1)
@@ -155,7 +214,7 @@ def estimate_offset(F, homog_points1, homog_points2, max_offset=600):
     #  Devolver el desfase estimado
     return np.argmin(offset_loss) - max_offset, offset_loss
 
-def intersect_line_polyline(line, polyline):
+def intersect_line_polyline(line, polyline, all=False):
     """
     Calcula la intersección entre una recta y una polilínea en coordenadas homogéneas.
     :param line: Ecuación de la recta en coordenadas homogéneas (3,).
@@ -163,6 +222,7 @@ def intersect_line_polyline(line, polyline):
     :param t: Parámetro con los valores de tiempo asociados a cada vértice de la polilínea (N,). 
               Debe ser una secuencia estrictamente monótona.
               Si no se proporciona, se asume t = [0, 1, ..., N-1].
+    :param all: Si es True, se buscan todas las intersecciones. Si es False, se busca solo la más cercana al centro de la polilínea.
     :return: (I, idx, t), con:
              Punto de intersección I en coordenadas homogéneas (3,).
              Índice idx del segmento de la polilínea.
@@ -175,19 +235,23 @@ def intersect_line_polyline(line, polyline):
     sign_changes = np.where(np.diff(distance_sign))[0]
     if len(sign_changes) == 0:
         return None  # No hay intersección
-    # Get sign change closest to the middle of the polyline
-    mid_idx = polyline.shape[1] / 2
-    idx = sign_changes[np.argmin(np.abs(sign_changes - mid_idx))]
+    if not all:
+        # Get sign change closest to the middle of the polyline
+        mid_idx = polyline.shape[1] / 2
+        idx = sign_changes[np.argmin(np.abs(sign_changes - mid_idx))]
+    else:
+        idx = sign_changes
+    
     # Get intersection point
     p1 = polyline[:, idx]
     p2 = polyline[:, idx + 1]
     line_segment = line_p2p(p1, p2)
-    intersection = np.cross(line, line_segment)
+    intersection = np.cross(line, line_segment, axisc=0)
     intersection /= intersection[2]
-    t = (np.linalg.norm(intersection[:2] - p1[:2]) / np.linalg.norm(p2[:2] - p1[:2]))
+    t = (np.linalg.norm(intersection[:2] - p1[:2], axis=0) / np.linalg.norm(p2[:2] - p1[:2], axis=0))
     return intersection, idx, t
 
-def intersect_line_polycurve(line, polyline, t=None):
+def intersect_line_polycurve(line, polyline, t=None, all=False):
     """
     Calcula la intersección entre una recta y una curva poligonal en coordenadas homogéneas.
     :param line: Ecuación de la recta en coordenadas homogéneas (3,).
@@ -202,7 +266,7 @@ def intersect_line_polycurve(line, polyline, t=None):
              con idx tal que t[idx]<=u<=t[idx+1], v = (u - t[idx]) / (t[idx+1]-t[idx]).
              Si no hay intersección, devuelve None.
     """
-    aux = intersect_line_polyline(line, polyline)
+    aux = intersect_line_polyline(line, polyline, all=all)
     if aux is None:
         return None
     else:
@@ -261,9 +325,10 @@ def refine_offset(F, homog_points1, homog_points2, offset, fps_ratio=1.0, thres=
     local_offset = np.zeros(homog_points1.shape[1], dtype=np.float32) * np.nan              # Array de offsets locales       
     permutation = np.array([thres + (-1)**(d % 2)*((d+1)//2) for d in range(2*thres+1)])    # permutation array for later use
     min_points = max(2, min_points)
+    o = int(round(offset))
     # Estimar la correspondencia local para cada frame del vídeo 1
-    start_idx = max(0, -offset)+thres
-    end_idx = min(homog_points1.shape[1], homog_points2.shape[1]-max(0, offset))-thres
+    start_idx = max(0, -o)+thres
+    end_idx = min(homog_points1.shape[1], homog_points2.shape[1]-max(0, o))-thres
     for idx in range(start_idx, end_idx):
         if epilines[idx, 2] == 0: # Línea epipolar no existente
             local_offset[idx] = np.nan
@@ -281,15 +346,22 @@ def refine_offset(F, homog_points1, homog_points2, offset, fps_ratio=1.0, thres=
         # if np.sum(valid[thres-1:thres+2]==0):  # No hay puntos válidos cerca del punto central: la correspondencia no es fiable
         #     local_offset[idx] = np.nan 
         #     continue
-        aux = intersect_line_polycurve(epilines[idx, :], polyline=polyline[:, valid], t=np.arange(-thres, thres+1)[valid])
+        aux = intersect_line_polycurve(epilines[idx, :], polyline=polyline[:, valid], t=np.arange(-thres, thres+1)[valid], all=True)
         if aux is None:  # local offset as closest point to the epipolar line
             interpolation = interpolate_missing_positions(polyline)
             interpolation = interpolation[:, permutation]   # reorder interpolation so the medium points are the first
             distances = np.abs(distance_point_to_line(interpolation, epilines[idx, :][np.newaxis, :]))
-            local_offset[idx] =  permutation[np.argmin(distances)] - thres + corr_idx - idx
+            argmin = np.argmin(distances)
+            if distances[argmin]<10:   # Solo considerar la correspondencia si la distancia es pequeña
+                local_offset[idx] =  permutation[argmin] - thres + corr_idx - idx
             continue
         intersection, t = aux
-        local_offset[idx] = corr_idx + t - idx
+        # if False and intersection.shape[1] > 1:   # Si hay más de una intersección, la correspondencia no es fiable
+        #     local_offset[idx] = np.nan
+        #     continue
+        # else:
+        #     local_offset[idx] = corr_idx + t[0] - idx
+        local_offset[idx] = corr_idx + t[0] - idx
         # print(polyline, epilines[idx, :], intersection, intersection_idx, t, local_offset[idx - start_idx], sep='\n\n')
     
     # Linear regression of local_offset to estimate global offset and fps ratio
@@ -301,9 +373,15 @@ def refine_offset(F, homog_points1, homog_points2, offset, fps_ratio=1.0, thres=
     x, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
     refined_offset = x[1]
     fps_ratio = x[0]
-    # print(np.sum(np.isnan(local_offset)), 'NaN values in local offset refinement')
-    # print(np.sum(local_offset == local_offset.astype(np.int32)) , 'integer values in local offset refinement')
-    # print(len(local_offset), 'total values in local offset refinement')
+    
+    # Show type of values in local_offset
+    # nan_count = np.sum(np.isnan(local_offset))
+    # int_count = np.sum(~np.isnan(local_offset) & (local_offset == local_offset.astype(np.int32)))
+    # float_count = np.sum(~np.isnan(local_offset) & (local_offset != local_offset.astype(np.int32)))
+    # total_count = len(local_offset)
+    # print(f'{nan_count}/{total_count} NaN values in local offset refinement')
+    # print(f'{int_count}/{total_count} integer values in local offset refinement')
+    # print(f'{float_count}/{total_count} floating point values in local offset refinement')
     if save_correspondences is not None:
         pd.DataFrame({'frame': np.arange(homog_points1.shape[1]), 'offset': local_offset}).to_csv(save_correspondences, index=False, na_rep='nan')
     return refined_offset, fps_ratio

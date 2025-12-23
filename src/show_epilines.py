@@ -113,34 +113,40 @@ def get_frame_count(input):
     return frame_count
 
 def draw_polyline(frame, points, color=(0, 255, 255), thickness=2):
-    for i in range(points.shape[1]-1):
-        pt1 = (int(round(points[0, i])), int(round(points[1, i])))
-        pt2 = (int(round(points[0, i+1])), int(round(points[1, i+1])))
-        frame = cv.line(frame, pt1, pt2, color, thickness)
+    if points.ndim == 1:
+        points = points[:, np.newaxis]
+    if thickness!=0:
+        for i in range(points.shape[1]-1):
+            pt1 = (int(round(points[0, i])), int(round(points[1, i])))
+            pt2 = (int(round(points[0, i+1])), int(round(points[1, i+1])))
+            frame = cv.line(frame, pt1, pt2, color, thickness)
     for i in range(points.shape[1]):
         pt = (int(round(points[0, i])), int(round(points[1, i])))
         frame = cv.circle(frame, pt, 3, color, -1)
     return frame
 
-def transform_frame(frame, nframe=0, frame_count=100, point=None, line=None, putText=True, mframe=None, distance=None, poly=None):
+def transform_frame(frame, nframe=0, frame_count=100, point=None, line=None, putText=True, mframe=None, distance=None, poly=None, intersection=None):
     global zoom
+    res = frame.copy()
     if putText:
-        frame = cv.putText(frame, f"Frame {nframe}/{frame_count}", (10, 30), cv.FONT_HERSHEY_PLAIN, 2, (0, 0, 0), 2)
+        res = cv.putText(res, f"Frame {nframe}/{frame_count}", (10, 30), cv.FONT_HERSHEY_PLAIN, 2, (0, 0, 0), 2)
         if mframe is not None:
-            frame = cv.putText(frame, f"->{mframe}", (410, 30), cv.FONT_HERSHEY_PLAIN, 2, (0, 0, 0), 2)
+            res = cv.putText(res, f"->{mframe}", (410, 30), cv.FONT_HERSHEY_PLAIN, 2, (0, 0, 0), 2)
         if distance is not None:
-            frame = cv.putText(frame, f"d={distance:.2f} px", (910, 30), cv.FONT_HERSHEY_PLAIN, 2, (0, 0, 0), 2)
+            res = cv.putText(res, f"d={distance:.2f} px", (910, 30), cv.FONT_HERSHEY_PLAIN, 2, (0, 0, 0), 2)
     if line is not None:
-        frame = draw_line(frame, line, color=(255, 0, 0), thickness=2)
+        res = draw_line(res, line, color=(255, 0, 0), thickness=2)
     if poly is not None:
-        frame = draw_polyline(frame, poly[:2, :], color=(0, 255, 255), thickness=2)
+        res = draw_polyline(res, poly[:2, :], color=(0, 255, 255), thickness=2)
+    if intersection is not None:
+        res = draw_polyline(res, intersection[:2, :], color=(0, 0, 255), thickness=0)
     if point is not None:
-        frame = cv.circle(frame, (int(point[0]), int(point[1])), 5, (0, 255, 0), -1)
+        res = cv.circle(res, (int(point[0]), int(point[1])), 5, (0, 255, 0), -1)
     if zoom != 1.0: 
-        width, height = int(frame.shape[1] * zoom), int(frame.shape[0] * zoom)
-        frame = cv.resize(frame, (width, height), interpolation=cv.INTER_CUBIC)
+        width, height = int(res.shape[1] * zoom), int(res.shape[0] * zoom)
+        res = cv.resize(res, (width, height), interpolation=cv.INTER_CUBIC)
 
-    return frame
+    return res
 
 videos = [cv.VideoCapture(input) for input in args.input]
 frame_count = [int(video.get(cv.CAP_PROP_FRAME_COUNT)) for video in videos]
@@ -148,9 +154,7 @@ idx = [0, 0]  # Índices de los frames actuales
 old_idx = [0, 0]  # Índices de los frames anteriores
 frame = [None, None]
 for i in range(2):
-    success, temp_frame = videos[i].read()
-    if success:
-        frame[i] = transform_frame(temp_frame, 0, frame_count[i])
+    _, frame[i] = videos[i].read()
 poly = False  # Para mostrar polígono considerado al calcular la correspondencia local
 thres = 10
 fps_ratio = fps[1] / fps[0]
@@ -175,17 +179,19 @@ def get_frame(nvideo):
     old_idx[nvideo] = nframe
     return frame[nvideo]
 
-def get_tframe(nvideo, point=None, line=None, putText=True, mframe=None, distance=None, poly=None):
+def get_tframe(nvideo, point=None, line=None, putText=True, mframe=None, distance=None, poly=None, intersection=None):
     # Obtiene el frame transformado del vídeo 1 o 2 correspondiente
     temp_frame = get_frame(nvideo)
     if temp_frame is not None:
-        return transform_frame(temp_frame, idx[nvideo], frame_count[nvideo], point, line, putText, mframe, distance, poly)
+        return transform_frame(temp_frame, idx[nvideo], frame_count[nvideo], point, line, putText, mframe, distance, poly, intersection)
     else:
         return None
 
 if frame[0] is not None and frame[1] is not None:
     cv.namedWindow("window")
-    cv.imshow("window", np.hstack((frame[0], frame[1])))
+    tframe0 = get_tframe(0)
+    tframe1 = get_tframe(1)
+    cv.imshow("window", np.hstack((tframe0, tframe1)))
     if args.correspondences is None:
         def manejador_tecla(key):
             global frame, idx, frame_count, zoom
@@ -237,10 +243,11 @@ if frame[0] is not None and frame[1] is not None:
             elif key & 0xFF == ord('z'):  # Retroceder 10 frames en el vídeo 1
                 idx[0] = (idx[0] - 10 + frame_count[0]) % frame_count[0]
             
-            corr = int(round(np.nan_to_num(idx[0] + correspondences.get(idx[0], -1), nan=-1, posinf=-1, neginf=-1)))
+            corr = idx[0] + correspondences.get(idx[0], np.nan)
+            icorr = int(round(corr)) if not np.isnan(corr) else -1
             if key & 0xFF in [ord('a'), ord('s'), ord('x'), ord('z')]:
-                if corr>=0 and corr<frame_count[1]:
-                    idx[1] = corr
+                if icorr>=0 and icorr<frame_count[1]:
+                    idx[1] = icorr
             # Vídeo 2
             if key & 0xFF == ord('f'):  # Avanzar un frame en el vídeo 2
                 idx[1] = (idx[1] + 1) % frame_count[1]
@@ -264,16 +271,19 @@ if frame[0] is not None and frame[1] is not None:
                 epiline = epilines[idx[0], :] if homog_points1[2, idx[0]] != 0 else None
                 point1 = homog_points2[:, idx[1]] if homog_points2[2, idx[1]] != 0 else None
                 distance = distance_point_to_line(homog_points2[:, idx[1]][:, np.newaxis], epiline[np.newaxis, :])[0] if (epiline is not None and point1 is not None) else None
-                polyline0 = None
+                polyline0, intersection0 = None, None
                 if poly:
                     polyline0 = np.zeros((3, 2*thres+1))
                     valid = np.zeros((2*thres+1,), dtype=bool)
                     for d in range(-thres, thres+1):
                         polyline0[:, d+thres] = homog_points1[:, idx[0] + d] if idx[0] + d >=0 and idx[0] + d < homog_points1.shape[1] else np.zeros((3,))
                         valid[d+thres] = homog_points1[2, idx[0] + d] > 0 if idx[0] + d >=0 and idx[0] + d < homog_points1.shape[1] else False
-                    polyline0 = polyline0[:2, valid] if np.sum(valid)>0 else None
-                tframe0 = get_tframe(0, point=point0, line=epiline0, mframe=corr, distance=distance, poly=polyline0)
-                polyline = None
+                    polyline0 = polyline0[:, valid] if np.sum(valid)>0 else None
+                    aux = intersect_line_polycurve(epiline0, polyline0, all=True) if epiline0 is not None and polyline0 is not None else None
+                    if aux is not None:
+                        intersection0, _ = aux
+                tframe0 = get_tframe(0, point=point0, line=epiline0, mframe=corr, distance=distance, poly=polyline0, intersection=intersection0)
+                polyline, intersection1 = None, None
                 if poly:
                     polyline = np.zeros((3, 2*thres+1))
                     valid = np.zeros((2*thres+1,), dtype=bool)
@@ -281,8 +291,11 @@ if frame[0] is not None and frame[1] is not None:
                     for d in range(-thres, thres+1):
                         polyline[:, d+thres] = homog_points2[:, corr_idx + d] if corr_idx + d >=0 and corr_idx + d < homog_points2.shape[1] else np.zeros((3,))
                         valid[d+thres] = homog_points2[2, corr_idx + d] > 0 if corr_idx + d >=0 and corr_idx + d < homog_points2.shape[1] else False
-                    polyline = polyline[:2, valid] if np.sum(valid)>0 else None
-                tframe1 = get_tframe(1, point=point1, line=epiline, poly=polyline)
+                    polyline = polyline[:, valid] if np.sum(valid)>0 else None
+                    aux = intersect_line_polycurve(epiline, polyline, all=True) if epiline is not None and polyline is not None else None
+                    if aux is not None:
+                        intersection1, _ = aux
+                tframe1 = get_tframe(1, point=point1, line=epiline, poly=polyline, intersection=intersection1)
                 cv.imshow("window", np.hstack((tframe0, tframe1)))
 
     key = cv.waitKey(0)

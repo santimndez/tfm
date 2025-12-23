@@ -9,7 +9,8 @@ def inhomog(homog_points):  # Convertir a coordenadas cartesianas (vector vertic
 
 def line_p2p(h1, h2):
     # Calcular la ecuación de la recta que pasa por dos puntos dados en coordenadas homogéneas
-    return np.cross(h1, h2).T
+    # Si h1 es un array de puntos (por columnas), entonces devuelve un array de rectas (por filas)
+    return np.cross(h1, h2, axisa=0, axisb=0)
 
 def get_epipolar_point(C, P):
     # Get epipolar point in camera 2 from camera 1 center C and projection matrix P of camera 2
