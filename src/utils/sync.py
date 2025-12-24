@@ -306,6 +306,21 @@ def piecewise_linear_interpolate(t, points, t_new):
     spline = make_interp_spline(t, points.T, k=1)
     return spline(t_new).T    
 
+def get_rebounds(points, thres=-0.5):
+    """
+    Obtiene cambios de dirección bruscos de los puntos 2D en coordenadas homogéneas.
+    :param points: array (3xN) de puntos en coordenadas homogéneas.
+    :param thres: umbral para detectar rebotes (entre 0 y -1) en función de la similitud coseno de la velocidad previa y posterior en cada instante.
+    :return: array (N,) de rebotes.
+    """
+    v1_minus, v1_plus = np.zeros_like(points), np.zeros_like(points)
+    v1_minus[:, 1:] = np.diff(points)
+    v1_minus[:, 0] = 0
+    v1_plus = np.roll(v1_minus, shift=-1, axis=1)
+    v1_cos = np.einsum('ij,ij->j', v1_minus, v1_plus)/ (np.linalg.norm(v1_minus, axis=0) * np.linalg.norm(v1_plus, axis=0) + 1e-8)
+    rebounds = np.where(v1_cos < thres)[0]
+    return rebounds
+
 def refine_offset(F, homog_points1, homog_points2, offset, fps_ratio=1.0, thres=10, min_points=2, save_correspondences=None):
     """
     Refina la estimación del desfase (offset) entre dos secuencias de puntos 2D usando la matriz fundamental F.
@@ -322,48 +337,108 @@ def refine_offset(F, homog_points1, homog_points2, offset, fps_ratio=1.0, thres=
     :return: Nueva estimación del offset (en número de frames) y ratio de fps estimado.
     """
     epilines = (F @ homog_points1).T
-    local_offset = np.zeros(homog_points1.shape[1], dtype=np.float32) * np.nan              # Array de offsets locales       
+    local_offset = np.zeros(homog_points1.shape[1], dtype=np.float32) * np.nan              # Array de offsets locales     
     permutation = np.array([thres + (-1)**(d % 2)*((d+1)//2) for d in range(2*thres+1)])    # permutation array for later use
+                                                                                            # order [thres, thres-1, thres+1, thres-2, thres+2, ...]
     min_points = max(2, min_points)
     o = int(round(offset))
+    count = 0
     # Estimar la correspondencia local para cada frame del vídeo 1
     start_idx = max(0, -o)+thres
     end_idx = min(homog_points1.shape[1], homog_points2.shape[1]-max(0, o))-thres
     for idx in range(start_idx, end_idx):
         if epilines[idx, 2] == 0: # Línea epipolar no existente
-            local_offset[idx] = np.nan
+            # local_offset[idx] = np.nan
             continue
-        # Get intersection of epipolar line with polygon of valid points
+        # Calcular la intersección de la recta epipolar con el polígono de puntos válidos
         polyline = np.zeros((3,2*thres+1))
         valid = np.zeros((2*thres+1,), dtype=bool)
         corr_idx = int(round(idx * fps_ratio + offset))
         for d in range(-thres, thres+1):
             polyline[:, d+thres] = homog_points2[:, corr_idx + d] if corr_idx + d >=0 and corr_idx + d < homog_points2.shape[1] else np.zeros((3,))
             valid[d+thres] = homog_points2[2, corr_idx + d] > 0 if corr_idx + d >=0 and corr_idx + d < homog_points2.shape[1] else False
-        if np.sum(valid)<min_points: # No hay suficientes puntos válidos para interpolar
+        nvalid = np.sum(valid)
+        if nvalid < min_points: # No hay suficientes puntos válidos para interpolar
             local_offset[idx] = np.nan
             continue
         # if np.sum(valid[thres-1:thres+2]==0):  # No hay puntos válidos cerca del punto central: la correspondencia no es fiable
         #     local_offset[idx] = np.nan 
         #     continue
         aux = intersect_line_polycurve(epilines[idx, :], polyline=polyline[:, valid], t=np.arange(-thres, thres+1)[valid], all=True)
-        if aux is None:  # local offset as closest point to the epipolar line
-            interpolation = interpolate_missing_positions(polyline)
-            interpolation = interpolation[:, permutation]   # reorder interpolation so the medium points are the first
-            distances = np.abs(distance_point_to_line(interpolation, epilines[idx, :][np.newaxis, :]))
+        
+        if aux is None:  # Si no hay intersección, local offset es el punto más cercano a la epipolar
+            distances = np.abs(distance_point_to_line(polyline, epilines[idx, :][np.newaxis, :]))
+            distances[~valid] = np.inf          # Descartar puntos no válidos
+            distances = distances[permutation]  # Reordenar las distancias para que los puntos centrales vayan primero
             argmin = np.argmin(distances)
             if distances[argmin]<10:   # Solo considerar la correspondencia si la distancia es pequeña
                 local_offset[idx] =  permutation[argmin] - thres + corr_idx - idx
             continue
+        
         intersection, t = aux
-        # if False and intersection.shape[1] > 1:   # Si hay más de una intersección, la correspondencia no es fiable
-        #     local_offset[idx] = np.nan
+
+        # Si la intersección es única, la selecciona
+        if intersection.shape[1] == 1:
+            local_offset[idx] = t[0] + corr_idx - idx
+            continue
+
+        # Detectar rebotes o cambios de sentido de la pelota
+        polyline0 = np.zeros((3, 2*thres+1))
+        for d in range(-thres, thres+1):
+            polyline0[:, d+thres] = homog_points1[:, corr_idx + d] if corr_idx + d >=0 and corr_idx + d < homog_points1.shape[1] else np.zeros((3,))
+        rebounds0 = get_rebounds(polyline0) - max(0, idx-thres)
+        rebounds1 = get_rebounds(polyline)
+        rpos0 = np.sum(rebounds0>0)
+        rprev0 = np.sum(rebounds0<0)
+        r0 = 1 if 0 in rebounds0 else 0
+        vt = np.ones_like(t, dtype=bool)
+        for it in range(t.shape[0]): # Si el orden de rebotes en el tiempo es inconsistente, se descarta la intersección
+            rpos = np.any(rebounds1>t[it])
+            rprev = np.any(rebounds1<t[it])
+            if rpos and not rprev \
+                and rpos0==0 and rprev0+r0>0:
+                    vt[it] = False
+            if rprev and not rpos \
+                and rprev0==0 and rpos0+r0>0:
+                    vt[it] = False
+            if rpos and rprev \
+                and ((rpos0+r0>0 and rprev0==0) or (rpos0==0 and rprev0+r0>0)):
+                    vt[it] = False
+            # if not (rpos and rprev):
+            #     vt[it] = not ((((rpos0>0) ^ rpos) or ((rprev0>0) ^ rprev)) \
+            #         and ((rpos0+r0>0) ^ rpos or ((rprev0>0) ^ rprev)) \
+            #         and ((rpos0>0) ^ rpos or ((rprev0+r0>0) ^ rprev)))
+            # r0 es un comodín, puede contarse como rebote antes o después del frame actual del vídeo 1 para validar la intersección
+        t = t[vt]
+        
+        # VELOCIDAD VERTICAL: NO TIENE SENTIDO PORQUE EN 2D NO SE CORRESPONDE CON LA VELOCIDAD VERTICAL EN 3D
+        # Si hay varias intersecciones, se descartan las que tienen distinto signo de velocidad vertical
+        # Velocidad vertical del punto de referencia
+        # v1_minus = np.sign(homog_points1[1, idx] - homog_points1[1, idx-1] if idx>0 and homog_points1[2, idx-1] > 0 else 0)
+        # v1_plus =  np.sign(homog_points1[1, idx+1] - homog_points1[1, idx] if idx<homog_points1.shape[1]-1 and homog_points1[2, idx+1] > 0 else 0)
+        # if v1_minus*v1_plus > 0:  # Obtiene la velocidad vertical de los puntos de intersección
+        #     v = np.zeros_like(t)
+        #     for it in range(t.shape[0]):
+        #         j = int(t[it])+thres
+        #         # get previous and next index with valid polyline point
+        #         pj = next((i for i in range(j, -1, -1) if valid[i]), -1)
+        #         nj = next((i for i in range(j+1, polyline.shape[1]) if valid[i]), polyline.shape[1])
+        #         v[it] = np.sign(polyline[1, nj] - polyline[1, pj]) if pj>=0 and nj < polyline.shape[1] else 0
+        #     t = t[v*v1_minus>=0]
+        
+        if t.shape[0] == 0:  # Se han descartado todas las intersecciones
+            count += 1
+            continue
+
+        # if intersection.shape[1] > 1:   # Heurística alternativa: Si hay más de una intersección, descartar la correspondencia por no ser fiable
+        #     count += 1
         #     continue
-        # else:
-        #     local_offset[idx] = corr_idx + t[0] - idx
-        local_offset[idx] = corr_idx + t[0] - idx
-        # print(polyline, epilines[idx, :], intersection, intersection_idx, t, local_offset[idx - start_idx], sep='\n\n')
-    
+        # local_offset[idx] = corr_idx + t[0] - idx
+
+        # Si hay más de una intersección, escoger la más cercana al centro de la polilínea
+        argt = np.argmin(np.abs(t))
+        local_offset[idx] = t[argt] + corr_idx - idx
+
     # Linear regression of local_offset to estimate global offset and fps ratio
     valid_mask = ~np.isnan(local_offset)
     if np.sum(valid_mask) < 2:
@@ -375,13 +450,14 @@ def refine_offset(F, homog_points1, homog_points2, offset, fps_ratio=1.0, thres=
     fps_ratio = x[0]
     
     # Show type of values in local_offset
-    # nan_count = np.sum(np.isnan(local_offset))
-    # int_count = np.sum(~np.isnan(local_offset) & (local_offset == local_offset.astype(np.int32)))
-    # float_count = np.sum(~np.isnan(local_offset) & (local_offset != local_offset.astype(np.int32)))
-    # total_count = len(local_offset)
-    # print(f'{nan_count}/{total_count} NaN values in local offset refinement')
-    # print(f'{int_count}/{total_count} integer values in local offset refinement')
-    # print(f'{float_count}/{total_count} floating point values in local offset refinement')
+    nan_count = np.sum(np.isnan(local_offset))
+    int_count = np.sum(~np.isnan(local_offset) & (local_offset == local_offset.astype(np.int32)))
+    float_count = np.sum(~np.isnan(local_offset) & (local_offset != local_offset.astype(np.int32)))
+    total_count = len(local_offset)
+    print(f'{nan_count}/{total_count} NaN values in local offset refinement')
+    print(f'{int_count}/{total_count} integer values in local offset refinement')
+    print(f'{float_count}/{total_count} floating point values in local offset refinement')
+    print(f'{count}/{total_count} invalid values in local offset refinement by rebounds')
     if save_correspondences is not None:
         pd.DataFrame({'frame': np.arange(homog_points1.shape[1]), 'offset': local_offset}).to_csv(save_correspondences, index=False, na_rep='nan')
     return refined_offset, fps_ratio
