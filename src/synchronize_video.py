@@ -20,7 +20,7 @@ parser.add_argument('-r', '--ref_points', metavar='reference_points', type=str, 
 parser.add_argument('--max_offset', metavar='max_offset', type=int, help='Desfase máximo a considerar en frames (por defecto 600)', default=600)
 parser.add_argument('-p', '--positions', metavar='ball_positions', type=str, nargs=2, help='Ruta a los archivos csv con las posiciones de la pelota en cada frame. Si no se proporciona, se deberá proporcionar el parámetro --model', default=None)
 parser.add_argument('--segment', action='store_true', help='Marca el centro de la pelota detectada en cada frame del vídeo de salida')
-parser.add_argument('--offset', metavar='offset', type=int, help='Desfase en frames a aplicar al primer vídeo (positivo para retrasarlo, negativo para adelantarlo). Si no se proporciona, se estimará automáticamente', default=None)
+parser.add_argument('--offset', metavar='offset', type=float, help='Desfase en frames a aplicar al primer vídeo (positivo para retrasarlo, negativo para adelantarlo). Si no se proporciona, se estimará automáticamente', default=None)
 parser.add_argument('--save_correspondences', type=str, help='Ruta donde se guardarán las correspondencias de frames obtenidas en la refinación del desfase')
 args = parser.parse_args()
 
