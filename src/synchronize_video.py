@@ -8,6 +8,10 @@ import time
 from utils.binocular import *
 from utils.ball_detection import *
 from utils.sync import *
+from utils.filter import estimate_trajectory
+from utils.tt_animation import ball_animation
+
+PROFILING = False
 
 # Argumentos de la línea de comandos
 parser = argparse.ArgumentParser(description='Sincronizar dos vídeos estéreo minimizando el error de reproyección de la segmentación de la pelota')
@@ -129,83 +133,37 @@ if args.segment:
 # Crear el vídeo con los dos vídeos sincronizados
 if args.output is not None:
     tic = time.time()
-    if False and args.offset is not None:
-        adjust_video_offset(video_files[0], video_files[1], int(round(offset)), args.output, args.separated)  
-    else:
-        adjust_video_offset_ffmpeg(video_files[0], video_files[1], refined_offset_seconds, args.output, args.separated)
+    adjust_video_offset_ffmpeg(video_files[0], video_files[1], refined_offset_seconds, args.output, args.separated)
     toc = time.time()
     print(f'El vídeo final ha sido creado en: {args.output} ({toc - tic:.2f} segundos)')
 
-# Calcular la posición 3D de la pelota y guardarla en un archivo CSV
-homog_points1, homog_points2 = sync_positions(homog_points1, homog_points2, offset, fps_ratio)
-trajectory = triangulate_ball(homog_points1, homog_points2, M[0], M[1])
-pd.DataFrame(trajectory.T).to_csv('ball_trajectory_3D.csv', index=False, header=None)
-print(f'Trayectoria 3D de la pelota guardada en ball_trajectory_3D.csv')
+APPLY_FILTERING = False
+if not APPLY_FILTERING:
+    # Calcular la posición 3D de la pelota y guardarla en un archivo CSV
+    homog_points1, homog_points2 = sync_positions(homog_points1, homog_points2, offset, fps_ratio)
+    trajectory = triangulate_ball(homog_points1, homog_points2, M[0], M[1])
+    pd.DataFrame(trajectory.T).to_csv('ball_trajectory_3D.csv', index=False, header=None)
+    print(f'Trayectoria 3D de la pelota guardada en ball_trajectory_3D.csv')
 
-# Rellenar los huecos en la trayectoria mediante interpolación lineal
-# first = trajectory.shape[1]
-# last = -1
-# for i in range(trajectory.shape[1]):
-#     if trajectory[3, i] > 0.0:
-#         first = i
-#         break
-# for i in range(trajectory.shape[1]-1, -1, -1):
-#     if trajectory[3, i] > 0.0:
-#         last = i
-#         break
-# trajectory[:, first:last+1] = interpolate_missing_positions(trajectory[:, first:last+1], trajectory[3, first:last+1] > 0)
-trajectory = interpolate_missing_positions(trajectory, trajectory, trajectory[3, :] > 0)
+    trajectory = interpolate_missing_positions(trajectory, trajectory, trajectory[3, :] > 0)
 
-# Crea una animación (vídeo) 3D de la trayectoria de la pelota sobre la mesa
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-from matplotlib.animation import FuncAnimation
+    # Crea una animación (vídeo) 3D de la trayectoria de la pelota sobre la mesa
+    ball_animation(trajectory)
 
-fig = plt.figure()
-ax = fig.add_subplot(111, projection='3d')
-# ax.plot(trajectory[0, :], trajectory[1, :], trajectory[2, :], label='Trayectoria de la pelota')
-ax.set_xlabel('X')
-ax.set_ylabel('Y')
-ax.set_zlabel('Z')
-ax.set_title('Trayectoria 3D de la pelota')
-ax.set_xlim3d(-TABLE_LENGTH/2, 1.5*TABLE_LENGTH)
-ax.set_ylim3d(-TABLE_LENGTH/2, 1.5*TABLE_LENGTH)
-ax.set_zlim3d(-TABLE_HEIGHT, 3*TABLE_HEIGHT)
+else:
+    # Estimar la trayectoria de la pelota utilizando un filtro UKF
+    t_1 = np.arange(homog_points1.shape[1]) / fps[0]
+    t_2 = np.arange(homog_points2.shape[1]) / fps[1]
 
+    if PROFILING: # Probar solo un trozo de vídeo
+        homog_points1 = homog_points1[:, (t_1 >= 10) & (t_1 <= 12)]
+        homog_points2 = homog_points2[:, (t_2 >= 10) & (t_2 <= 12)]
+        t_1 = t_1[(t_1 >= 10) & (t_1 <= 12)]
+        t_2 = t_2[(t_2 >= 10) & (t_2 <= 12)]
+    
+    X, t, rebounds, bounces, _, _ = estimate_trajectory(homog_points1, homog_points2, t_1, t_2, M[0], M[1], get_frame_shape(video_files[0]), get_frame_shape(video_files[1]))
 
-# Dibujar superficie de la mesa
-xx, yy = np.meshgrid([0, TABLE_WIDTH], [0, TABLE_LENGTH])
-zz = np.full_like(xx, 0)
-ax.plot_surface(xx, yy, zz, color='blue', alpha=0.5)
+    pd.DataFrame(np.hstack((X.T, t[:, np.newaxis]))).to_csv('ball_trajectory_3D.csv', index=False, header=None)
+    print(f'Trayectoria 3D de la pelota guardada en ball_trajectory_3D.csv')
 
-# Dibujar líneas de la mesa
-ax.plot([0, TABLE_WIDTH], [0, 0], [0, 0], color='white')
-ax.plot([TABLE_WIDTH, TABLE_WIDTH], [0, TABLE_LENGTH], [0, 0], color='white')
-ax.plot([TABLE_WIDTH, 0], [TABLE_LENGTH, TABLE_LENGTH], [0, 0], color='white')
-ax.plot([0, 0], [TABLE_LENGTH, 0], [0, 0], color='white')
-ax.plot([TABLE_WIDTH/2, TABLE_WIDTH/2], [0, TABLE_LENGTH], [0, 0], color='white')
-
-# Dibujar la red
-x_net = np.linspace(-NET_EXTRA_WIDTH, TABLE_WIDTH + NET_EXTRA_WIDTH, 40)
-z_net = np.linspace(0,  NET_HEIGHT, 10)
-XX, ZZ = np.meshgrid(x_net, z_net)
-YY = np.full_like(XX, TABLE_LENGTH/2)
-
-# Dibujar la red como una malla
-ax.plot_surface(XX, YY, ZZ, color='black', alpha=0.3)
-
-# Punto de la pelota
-ball, = ax.plot([], [], [], 'o', color='orange', markersize=5)
-
-def update(frame, ball, trajectory):
-    x = trajectory[0, frame]
-    y = trajectory[1, frame]
-    z = trajectory[2, frame]
-    ball.set_data([x], [y])
-    ball.set_3d_properties([z])
-    return ball,
-
-ani = FuncAnimation(fig, update, frames=trajectory.shape[1], fargs = (ball, trajectory), interval=16, blit=False, repeat=True)
-
-# ani.save('ball_trajectory_3D.mp4', writer='ffmpeg', fps=60)
-plt.show()
+    ball_animation(100*X[:3, :], t)

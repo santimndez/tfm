@@ -5,6 +5,18 @@ from scipy.interpolate import make_interp_spline
 from .binocular import distance_point_to_line, line_p2p
 import pandas as pd
 
+def get_frame_shape(video_file):
+    """
+    Obtiene el tamaño de frame (w, h) de un vídeo.
+    :param video_file: Ruta al archivo de vídeo.
+    :return: Tupla con el tamaño de frame (w, h).
+    """
+    cap = cv.VideoCapture(video_file)
+    w = int(cap.get(cv.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    return w, h
+
 def adjust_video_offset(video_file_1, video_file_2, offset, output_file, separated=False):
     """
     Sincroniza dos vídeos usando OpenCV. 
@@ -314,8 +326,7 @@ def get_rebounds(points, thres=-0.5):
     :return: array (N,) de rebotes.
     """
     v1_minus, v1_plus = np.zeros_like(points), np.zeros_like(points)
-    v1_minus[:, 1:] = np.diff(points)
-    v1_minus[:, 0] = 0
+    v1_minus[:, :] = np.diff(points, prepend=0)
     v1_plus = np.roll(v1_minus, shift=-1, axis=1)
     v1_cos = np.einsum('ij,ij->j', v1_minus, v1_plus)/ (np.linalg.norm(v1_minus, axis=0) * np.linalg.norm(v1_plus, axis=0) + 1e-8)
     rebounds = np.where(v1_cos < thres)[0]
