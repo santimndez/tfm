@@ -53,7 +53,8 @@ if not isfolder:
             width, height = int(frame.shape[1] * zoom), int(frame.shape[0] * zoom)
             frame = cv.resize(frame, (width, height), interpolation=cv.INTER_CUBIC)
         if success and putText:
-            cv.putText(frame, f"Frame {nframe}/{frame_count}", (10, 30), cv.FONT_HERSHEY_PLAIN, 2, (0, 0, 0), 2)
+            time_s = video.get(cv.CAP_PROP_POS_MSEC) / 1000
+            cv.putText(frame, f"Frame {nframe}/{frame_count} ({time_s:.2f}s)", (10, 30), cv.FONT_HERSHEY_PLAIN, 2, (0, 0, 0), 2)
 
         # Liberar el video      
         video.release()

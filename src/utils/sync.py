@@ -17,6 +17,36 @@ def get_frame_shape(video_file):
     cap.release()
     return w, h
 
+def get_timestamps(video_file):
+    """
+    Obtiene los timestamps de cada frame de un vídeo.
+    :param video_file: Ruta al archivo de vídeo.
+    :return: Lista de timestamps en segundos.
+    """
+    cmd = [
+        "ffprobe",
+        "-v", "error",                # NO logs
+        "-select_streams", "v",
+        "-show_entries", "packet=pts_time",
+        "-of", "csv=p=0",
+        video_file
+    ]
+
+    out = subprocess.check_output(
+        cmd,
+        stderr=subprocess.DEVNULL     # silenciar stderr por completo
+    ).decode()
+        
+    # Filtrar líneas vacías / inválidas
+    timestamps = [
+        float(line) for line in out.splitlines()
+        if line and line != "N/A"
+    ]
+
+    res = np.array(timestamps, dtype=np.float64)
+    res -= res[0] # Normalizar a partir del primer frame
+    return res
+
 def adjust_video_offset(video_file_1, video_file_2, offset, output_file, separated=False):
     """
     Sincroniza dos vídeos usando OpenCV. 
@@ -83,67 +113,13 @@ def adjust_video_offset(video_file_1, video_file_2, offset, output_file, separat
 def adjust_video_offset_ffmpeg(video_file_1, video_file_2, offset, output_file, separated=False, verbose=False):
     """
     Sincroniza dos vídeos usando ffmpeg. 
-    El offset en segundos se aplica al primer vídeo (positivo para retrasarlo, negativo para adelantarlo).
-    Si separated es True, solo se guarda el primer vídeo desplazado.
+    :param video_file_1: Ruta al primer archivo de vídeo.
+    :param video_file_2: Ruta al segundo archivo de vídeo.
+    :param offset: El offset en segundos se aplica al primer vídeo (positivo para retrasarlo, negativo para adelantarlo).
+    :param output_file: Ruta al archivo de salida.
+    :param separated: Si es True, solo se guarda el primer vídeo desplazado.
+    :param verbose: Si es True, se muestra la salida de ffmpeg.
     """
-    if not separated:
-        # Usamos ffmpeg para ajustar el desfase y juntar los vídeos
-        filter_complex = (
-            f'[0:v]setpts=PTS-STARTPTS+({offset})/TB[v0];'
-            '[1:v]setpts=PTS-STARTPTS[v1];'
-            '[v0][v1]vstack=inputs=2[v]'
-        )
-        # El comando ffmpeg para desplazar el segundo vídeo
-        command = [
-            'ffmpeg',
-            '-i', video_file_1,   # Primer vídeo
-            '-i', video_file_2,   # Segundo vídeo
-            '-filter_complex', filter_complex,  # Superponer los vídeos verticalmente
-            '-map', '[v]',  # Mapear el vídeo compuesto
-            '-map', '0:a?',      # Audio del primer vídeo (si existe)
-            # '-r', str(cv.VideoCapture(video_file_1).get(cv.CAP_PROP_FPS)), # Usar fps del primer vídeo
-            # '-vsync', '2',  # Evitar la duplicación de frames
-            '-fps_mode', 'vfr',
-            '-c:v', 'libx264',  # Codec de vídeo
-            '-c:a', 'aac',      # Codec de audio
-            '-y',               # Sobrescribir archivo de salida si ya existe
-            output_file         # Archivo de salida
-        ]
-    else:
-        # Usamos ffmpeg para ajustar el desfase y guardar el primer vídeo desplazado
-        filter_complex = f'[0:v]setpts=PTS-STARTPTS+({offset})/TB[v]'
-        command = [
-            'ffmpeg',
-            '-i', video_file_1,         # Primer vídeo
-            '-filter_complex', filter_complex,  # Desplazar el vídeo
-            '-y',                       # Sobrescribir archivo de salida si ya existe        
-            # '-r', '60',                 # str(cv.VideoCapture(video_file_1).get(cv.CAP_PROP_FPS)), # Usar fps del primer vídeo
-            # '-vsync', '2',              # Evitar la duplicación de frames
-            '-c:v', 'libx264',          # Codec de vídeo
-            '-c:a', 'aac',              # Codec de audio
-            '-y',                       # Sobrescribir archivo de salida si ya existe
-            output_file                 # Archivo de salida
-        ]
-    # Verbosity: global options
-    if not verbose:
-        command[1:1] = ['-hide_banner', '-loglevel', 'error', '-nostdin']
-        run_kwargs = {'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL, 'check': True}
-    else:
-        # verbose: dejar que ffmpeg imprima a stdout/stderr y no suprimir errores (ayuda en depuración)
-        command[1:1] = ['-nostdin']
-        run_kwargs = {'check': True}
-
-    subprocess.run(command, **run_kwargs)
-
-# Función para ajustar la sincronización de los vídeos según el desfase
-def adjust_video_offset_ffmpeg(video_file_1, video_file_2, offset, output_file, separated=False, verbose=False):
-    """
-    Sincroniza dos vídeos usando ffmpeg. 
-    El offset en segundos se aplica al primer vídeo (positivo para retrasarlo, negativo para adelantarlo).
-    Si separated es True, solo se guarda el primer vídeo desplazado.
-    :param verbose: si True muestra la salida de ffmpeg, si False reduce la verbosidad.
-    """
-    # Construir filter_complex
     if not separated:
         filter_complex = (
             f'[0:v]setpts=PTS-STARTPTS+({offset})/TB[v0];'
@@ -186,13 +162,12 @@ def adjust_video_offset_ffmpeg(video_file_1, video_file_2, offset, output_file, 
 
     subprocess.run(command, **run_kwargs)
 
-
-def estimate_offset(F, homog_points1, homog_points2, max_offset=600):
+def estimate_offset_epilines(epilines, homog_points1, homog_points2, max_offset=600):
     """
-    Estima el desfase (offset) entre dos secuencias de puntos 2D usando la matriz fundamental F.
+    Estima el desfase (offset) entre dos secuencias de puntos 2D de dos cámaras usando las rectas epipolares correspondientes a la primera secuencia.
     El offset es de la secuencia 2 respecto a la secuencia 1: positivo si la cámara 2 va adelantada respecto a la cámara 1.
     El offset se estima como el que minimiza la suma de las distancias de homog_points2 a las líneas epipolares correspondientes a homog_points1.
-    :param F: Matriz fundamental entre las dos cámaras. Transforma puntos de la imagen 1 en líneas epipolares en la imagen 2.
+    :param epilines: Rectas epipolares correspondientes a los puntos de la imagen 1 en en la imagen 2 en coordenadas homogéneas (Nx3).
     :param homog_points1: Puntos 2D en coordenadas homogéneas de la cámara 1 (3xN).
     :param homog_points2: Puntos 2D en coordenadas homogéneas de la cámara 2 (3xM).
     :param max_offset: Desfase máximo a considerar (en número de frames).
@@ -204,11 +179,10 @@ def estimate_offset(F, homog_points1, homog_points2, max_offset=600):
     if homog_points1.shape[1] < max_length:
         pad_width = max_length - homog_points1.shape[1]
         homog_points1 = np.hstack((homog_points1, np.zeros((3, pad_width))))
+        epilines = np.vstack((epilines, np.zeros((pad_width, 3))))
     if homog_points2.shape[1] < max_length:
         pad_width = max_length - homog_points2.shape[1]
         homog_points2 = np.hstack((homog_points2, np.zeros((3, pad_width))))
-
-    epilines = (F @ homog_points1).T
 
     offset_loss = np.zeros((2*max_offset+1,))
     for o in range(-max_offset, max_offset+1):
@@ -225,6 +199,22 @@ def estimate_offset(F, homog_points1, homog_points2, max_offset=600):
         
     #  Devolver el desfase estimado
     return np.argmin(offset_loss) - max_offset, offset_loss
+
+
+def estimate_offset(F, homog_points1, homog_points2, max_offset=600):
+    """
+    Estima el desfase (offset) entre dos secuencias de puntos 2D usando la matriz fundamental F y la función estimate_offset_epilines.
+    El offset es de la secuencia 2 respecto a la secuencia 1: positivo si la cámara 2 va adelantada respecto a la cámara 1.
+    El offset se estima como el que minimiza la suma de las distancias de homog_points2 a las líneas epipolares correspondientes a homog_points1.
+    :param F: Matriz fundamental entre las dos cámaras. Transforma puntos de la imagen 1 en líneas epipolares en la imagen 2.
+    :param homog_points1: Puntos 2D en coordenadas homogéneas de la cámara 1 (3xN).
+    :param homog_points2: Puntos 2D en coordenadas homogéneas de la cámara 2 (3xM).
+    :param max_offset: Desfase máximo a considerar (en número de frames).
+    :return: Desfase estimado (en número de frames) y array con la pérdida para cada desfase.
+    """
+    epilines = (F @ homog_points1).T
+
+    return estimate_offset_epilines(epilines, homog_points1, homog_points2, max_offset=max_offset)
 
 def intersect_line_polyline(line, polyline, all=False):
     """
@@ -272,8 +262,8 @@ def intersect_line_polycurve(line, polyline, t=None, all=False):
               Debe ser una secuencia estrictamente monótona.
               Si no se proporciona, se asume t = [0, 1, ..., N-1].
     :return: (I, u), con:
-             Punto de intersección I en coordenadas homogéneas (3,).
-             Parámetro temporal u en el que se alcanza la intersección en la curva poligonal.
+             Puntos de intersección I en coordenadas homogéneas (3,N).
+             Parámetros temporales u en los que se alcanza la intersección en la curva poligonal.
              I = polyline(u) = polyline[:, idx] * (1 - v) + polyline[:, idx + 1] * v, 
              con idx tal que t[idx]<=u<=t[idx+1], v = (u - t[idx]) / (t[idx+1]-t[idx]).
              Si no hay intersección, devuelve None.
@@ -318,7 +308,7 @@ def piecewise_linear_interpolate(t, points, t_new):
     spline = make_interp_spline(t, points.T, k=1)
     return spline(t_new).T    
 
-def get_rebounds(points, thres=-0.5):
+def get_rebounds(points, thres=0.5):
     """
     Obtiene cambios de dirección bruscos de los puntos 2D en coordenadas homogéneas.
     :param points: array (3xN) de puntos en coordenadas homogéneas.
@@ -326,11 +316,23 @@ def get_rebounds(points, thres=-0.5):
     :return: array (N,) de rebotes.
     """
     v1_minus, v1_plus = np.zeros_like(points), np.zeros_like(points)
-    v1_minus[:, :] = np.diff(points, prepend=0)
+    v1_minus[:, 1:] = np.diff(points)
+    v1_minus[:, 0] = np.nan
     v1_plus = np.roll(v1_minus, shift=-1, axis=1)
     v1_cos = np.einsum('ij,ij->j', v1_minus, v1_plus)/ (np.linalg.norm(v1_minus, axis=0) * np.linalg.norm(v1_plus, axis=0) + 1e-8)
     rebounds = np.where(v1_cos < thres)[0]
     return rebounds
+
+def filter_outliers_iqr(x):
+    """
+    Filtra los valores atípicos de un array utilizando el método del rango intercuartílico (IQR).
+    """
+    q1 = np.percentile(x, 25)
+    q3 = np.percentile(x, 75)
+    iqr = q3 - q1
+    lower_bound = q1 - 1.5 * iqr
+    upper_bound = q3 + 1.5 * iqr
+    return (x >= lower_bound) & (x <= upper_bound)
 
 def refine_offset(F, homog_points1, homog_points2, offset, fps_ratio=1.0, thres=10, min_points=2, save_correspondences=None):
     """
@@ -383,43 +385,51 @@ def refine_offset(F, homog_points1, homog_points2, offset, fps_ratio=1.0, thres=
             distances = distances[permutation]  # Reordenar las distancias para que los puntos centrales vayan primero
             argmin = np.argmin(distances)
             if distances[argmin]<10:   # Solo considerar la correspondencia si la distancia es pequeña
-                local_offset[idx] =  permutation[argmin] - thres + corr_idx - idx
+                local_offset[idx] =  permutation[argmin] - thres + corr_idx
             continue
         
         intersection, t = aux
 
         # Si la intersección es única, la selecciona
-        if intersection.shape[1] == 1:
-            local_offset[idx] = t[0] + corr_idx - idx
+        if t.shape[0] == 1:
+            local_offset[idx] = t[0] + corr_idx
             continue
 
         # Detectar rebotes o cambios de sentido de la pelota
         polyline0 = np.zeros((3, 2*thres+1))
         for d in range(-thres, thres+1):
             polyline0[:, d+thres] = homog_points1[:, corr_idx + d] if corr_idx + d >=0 and corr_idx + d < homog_points1.shape[1] else np.zeros((3,))
-        rebounds0 = get_rebounds(polyline0) - max(0, idx-thres)
-        rebounds1 = get_rebounds(polyline)
+        rebounds0 = get_rebounds(polyline0) - thres
+        rebounds1 = get_rebounds(polyline)  - thres
         rpos0 = np.sum(rebounds0>0)
         rprev0 = np.sum(rebounds0<0)
         r0 = 1 if 0 in rebounds0 else 0
         vt = np.ones_like(t, dtype=bool)
-        for it in range(t.shape[0]): # Si el orden de rebotes en el tiempo es inconsistente, se descarta la intersección
-            rpos = np.any(rebounds1>t[it])
-            rprev = np.any(rebounds1<t[it])
-            if rpos and not rprev \
-                and rpos0==0 and rprev0+r0>0:
+        if len(rebounds0) == len(rebounds1):
+            for it in range(t.shape[0]):
+                rpos = np.sum(rebounds1>t[it])
+                rprev = np.sum(rebounds1<=t[it])
+                if (rpos != rpos0+r0 or rprev != rprev0) and (rpos != rpos0 or rprev != rprev0+r0):
                     vt[it] = False
-            if rprev and not rpos \
-                and rprev0==0 and rpos0+r0>0:
-                    vt[it] = False
-            if rpos and rprev \
-                and ((rpos0+r0>0 and rprev0==0) or (rpos0==0 and rprev0+r0>0)):
-                    vt[it] = False
-            # if not (rpos and rprev):
-            #     vt[it] = not ((((rpos0>0) ^ rpos) or ((rprev0>0) ^ rprev)) \
-            #         and ((rpos0+r0>0) ^ rpos or ((rprev0>0) ^ rprev)) \
-            #         and ((rpos0>0) ^ rpos or ((rprev0+r0>0) ^ rprev)))
-            # r0 es un comodín, puede contarse como rebote antes o después del frame actual del vídeo 1 para validar la intersección
+        else:
+            continue  # Descartar el frame
+            # for it in range(t.shape[0]): # Si el orden de rebotes en el tiempo es inconsistente, se descarta la intersección
+            #     rpos = np.any(rebounds1>t[it])
+            #     rprev = np.any(rebounds1<t[it])
+            #     if rpos and not rprev \
+            #         and not rpos0 and rprev0+r0:
+            #             vt[it] = False
+            #     if rprev and not rpos \
+            #         and not rprev0 and rpos0+r0:
+            #             vt[it] = False
+            #     if rpos and rprev \
+            #         and ((rpos0+r0 and not rprev0) or (not rpos0 and rprev0+r0)):
+            #             vt[it] = False
+            #     # if not (rpos and rprev):
+            #     #     vt[it] = not ((((rpos0>0) ^ rpos) or ((rprev0>0) ^ rprev)) \
+            #     #         and ((rpos0+r0>0) ^ rpos or ((rprev0>0) ^ rprev)) \
+            #     #         and ((rpos0>0) ^ rpos or ((rprev0+r0>0) ^ rprev)))
+            #     # r0 es un comodín, puede contarse como rebote antes o después del frame actual del vídeo 1 para validar la intersección
         t = t[vt]
         
         # VELOCIDAD VERTICAL: NO TIENE SENTIDO PORQUE EN 2D NO SE CORRESPONDE CON LA VELOCIDAD VERTICAL EN 3D
@@ -444,18 +454,69 @@ def refine_offset(F, homog_points1, homog_points2, offset, fps_ratio=1.0, thres=
         # if intersection.shape[1] > 1:   # Heurística alternativa: Si hay más de una intersección, descartar la correspondencia por no ser fiable
         #     count += 1
         #     continue
-        # local_offset[idx] = corr_idx + t[0] - idx
+        # local_offset[idx] = corr_idx + t[0]
 
         # Si hay más de una intersección, escoger la más cercana al centro de la polilínea
         argt = np.argmin(np.abs(t))
-        local_offset[idx] = t[argt] + corr_idx - idx
+        local_offset[idx] = t[argt] + corr_idx
+    
+    # Show type of values in local_offset
+    nan_count = np.sum(np.isnan(local_offset))
+    int_count = np.sum(~np.isnan(local_offset) & (local_offset == local_offset.astype(np.int32)))
+    float_count = np.sum(~np.isnan(local_offset) & (local_offset != local_offset.astype(np.int32)))
+    total_count = len(local_offset)
+    print(f'{nan_count}/{total_count} NaN values in local offset refinement')
+    print(f'{int_count}/{total_count} integer values in local offset refinement')
+    print(f'{float_count}/{total_count} floating point values in local offset refinement')
+    print(f'{count}/{total_count} invalid values in local offset refinement by rebounds')
 
     # Linear regression of local_offset to estimate global offset and fps ratio
     valid_mask = ~np.isnan(local_offset)
     if np.sum(valid_mask) < 2:
         return offset  # No hay suficientes puntos para refinar
+    inliers = filter_outliers_iqr(local_offset[valid_mask])
+    print(f'{np.sum(inliers)}/{np.sum(valid_mask)} outliers removed')
+    A = np.vstack((np.arange(homog_points1.shape[1])[valid_mask][inliers], np.ones(np.sum(inliers)))).T
+    b = local_offset[valid_mask]
+    x, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+    refined_offset = x[1]
+    fps_ratio = x[0]
+    
+    if save_correspondences is not None:
+        pd.DataFrame({'frame': np.arange(homog_points1.shape[1]), 'offset': local_offset}).to_csv(save_correspondences, index=False, na_rep='nan')
+    
+    return refined_offset, fps_ratio
+
+def refine_offset_correlation(F, homog_points1, homog_points2, offset, fps_ratio=1.0, thres=10, min_points=None, save_correspondences=None):
+    epilines = (F @ homog_points1).T
+    local_offset = np.zeros(homog_points1.shape[1], dtype=np.float32) * np.nan  # Array de offsets locales  
+
+    if min_points is None:
+        min_points = thres
+    min_points = max(2, min_points)
+    o = int(round(offset))
+
+    # Estimar la correspondencia local para cada frame del vídeo 1
+    start_idx = max(0, -o)+thres
+    end_idx = min(homog_points1.shape[1], homog_points2.shape[1]-max(0, o))-thres
+    for idx in range(start_idx, end_idx):
+        corr_idx = int(round(idx * fps_ratio + offset))
+        if corr_idx-thres<0 or corr_idx+thres>=homog_points2.shape[1]:
+            continue
+        if np.sum(homog_points1[2, idx-thres:idx+thres+1]*homog_points2[2, corr_idx-thres:corr_idx+thres+1]) >= min_points: # Check minimum number of frames with valid points on both videos
+            local_offset[idx], _ = estimate_offset_epilines(epilines[idx-thres:idx+thres+1, :], 
+                                                     homog_points1[:, idx-thres:idx+thres+1], 
+                                                     homog_points2[:, corr_idx-thres:corr_idx+thres+1], 
+                                                     max_offset=thres)
+            local_offset[idx] *= -1
+            local_offset[idx] += corr_idx
+    
+    # Linear regression of local_offset to estimate global offset and fps ratio
+    valid_mask = ~np.isnan(local_offset)
+    if np.sum(valid_mask) < 2:
+        return offset  # No hay suficientes puntos para refinar
     A = np.vstack((np.arange(homog_points1.shape[1])[valid_mask], np.ones(np.sum(valid_mask)))).T
-    b = np.arange(homog_points1.shape[1])[valid_mask] + local_offset[valid_mask]
+    b = local_offset[valid_mask]
     x, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
     refined_offset = x[1]
     fps_ratio = x[0]
@@ -468,10 +529,146 @@ def refine_offset(F, homog_points1, homog_points2, offset, fps_ratio=1.0, thres=
     print(f'{nan_count}/{total_count} NaN values in local offset refinement')
     print(f'{int_count}/{total_count} integer values in local offset refinement')
     print(f'{float_count}/{total_count} floating point values in local offset refinement')
-    print(f'{count}/{total_count} invalid values in local offset refinement by rebounds')
     if save_correspondences is not None:
         pd.DataFrame({'frame': np.arange(homog_points1.shape[1]), 'offset': local_offset}).to_csv(save_correspondences, index=False, na_rep='nan')
     return refined_offset, fps_ratio
+
+def refine_offset_timestamps(F, homog_points1, homog_points2, timestamps1, timestamps2, offset, thres=10, min_points=2, save_correspondences=None):
+    """
+    Refina la estimación del desfase (offset) entre dos secuencias de puntos 2D usando la matriz fundamental F.
+    Utiliza los timestamps de ambos vídeos, lo que la hace útil para vídeos con tasa de frames variable (vfr).
+    El offset es de la secuencia 1 respecto a la secuencia 2: positivo si la cámara 1 va adelantada respecto a la cámara 2.
+    :param F: Matriz fundamental entre las dos cámaras. Transforma puntos de la imagen 1 en líneas epipolares en la imagen 2.
+    :param homog_points1: Puntos 2D en coordenadas homogéneas de la cámara 1 (3xN).
+    :param homog_points2: Puntos 2D en coordenadas homogéneas de la cámara 2 (3xM).
+    :param timestamps1: Tiempos de los fotogramas en la cámara 1 (N,).
+    :param timestamps2: Tiempos de los fotogramas en la cámara 2 (M,).
+    :param offset: Desfase inicial estimado en segundos.
+    :param fps_ratio: Ratio de fps entre las dos cámaras (fps2 / fps1).
+    :param thres: Número de frames a cada lado para buscar correspondencias locales.
+    :param min_points: Número mínimo de puntos válidos para considerar una correspondencia local como válida.
+                       Si no se proporciona, se 2. Como mínimo se tomará 2.
+    :param save_correspondences: Ruta para guardar las correspondencias locales (opcional).
+    :return: Nueva estimación del offset en segundos.
+    """
+    epilines = (F @ homog_points1).T
+    local_offset = np.zeros(homog_points1.shape[1], dtype=np.float32) * np.nan              # Array de offsets locales   
+    permutation = np.array([thres + (-1)**(d % 2)*((d+1)//2) for d in range(2*thres+1)])    # permutation array for later use
+                                                                                            # order [thres, thres-1, thres+1, thres-2, thres+2, ...]
+    min_points = max(2, min_points)
+
+    count = 0
+    corr_idx = 0
+    # Estimar la correspondencia local para cada frame del vídeo 1
+    for idx in range(homog_points1.shape[1]):
+        if epilines[idx, 2] == 0: # Línea epipolar no existente
+            # local_offset[idx] = np.nan
+            continue
+        corr_idx = corr_idx + np.searchsorted(timestamps2[corr_idx:], timestamps1[idx]+offset, side='left') # Encontrar matching a priori
+        if corr_idx<thres or corr_idx+thres>=homog_points2.shape[1]:
+            continue
+        # Calcular la intersección de la recta epipolar con el polígono de puntos válidos
+        polyline = np.zeros((3,2*thres+1))
+        valid = np.zeros((2*thres+1,), dtype=bool)
+        for d in range(-thres, thres+1):
+            polyline[:, d+thres] = homog_points2[:, corr_idx + d] if corr_idx + d >=0 and corr_idx + d < homog_points2.shape[1] else np.zeros((3,))
+            valid[d+thres] = homog_points2[2, corr_idx + d] > 0 if corr_idx + d >=0 and corr_idx + d < homog_points2.shape[1] else False
+        nvalid = np.sum(valid)
+        if nvalid < min_points: # No hay suficientes puntos válidos para interpolar
+            continue
+
+        aux = intersect_line_polycurve(epilines[idx, :], polyline=polyline[:, valid], t=timestamps2[corr_idx-thres:corr_idx+thres+1][valid], all=True)
+ 
+        if aux is None:  # Si no hay intersección, local offset es el punto más cercano a la epipolar
+            distances = np.abs(distance_point_to_line(polyline, epilines[idx, :][np.newaxis, :]))
+            distances[~valid] = np.inf          # Descartar puntos no válidos
+            distances = distances[permutation]  # Reordenar las distancias para que los puntos centrales vayan primero
+            argmin = np.argmin(distances)
+            if distances[argmin]<10:   # Solo considerar la correspondencia si la distancia es pequeña
+                local_offset[idx] =  timestamps2[corr_idx+permutation[argmin]]
+            continue
+        
+        intersection, t = aux
+
+        # Si la intersección es única, la selecciona
+        if t.shape[0] == 1:
+            local_offset[idx] = t[0]
+            continue
+
+        # Detectar rebotes o cambios de sentido de la pelota
+        polyline0 = np.zeros((3, 2*thres+1))
+        for d in range(-thres, thres+1):
+            polyline0[:, d+thres] = homog_points1[:, corr_idx + d] if corr_idx + d >=0 and corr_idx + d < homog_points1.shape[1] else np.zeros((3,))
+        rebounds0 = get_rebounds(polyline0) - thres
+        rebounds1 = get_rebounds(polyline)  - thres
+        rpos0 = np.sum(rebounds0>0)
+        rprev0 = np.sum(rebounds0<0)
+        r0 = 1 if 0 in rebounds0 else 0
+        vt = np.ones_like(t, dtype=bool)
+        if len(rebounds0) == len(rebounds1):
+            for it in range(t.shape[0]):
+                rpos = np.sum(rebounds1>t[it])
+                rprev = np.sum(rebounds1<=t[it])
+                if (rpos != rpos0+r0 or rprev != rprev0) and (rpos != rpos0 or rprev != rprev0+r0):
+                    vt[it] = False
+        else:
+            count += 1
+            continue  # Descartar el frame
+            # for it in range(t.shape[0]): # Si el orden de rebotes en el tiempo es inconsistente, se descarta la intersección
+            #     rpos = np.any(rebounds1>t[it])
+            #     rprev = np.any(rebounds1<t[it])
+            #     if rpos and not rprev \
+            #         and not rpos0 and rprev0+r0:
+            #             vt[it] = False
+            #     if rprev and not rpos \
+            #         and not rprev0 and rpos0+r0:
+            #             vt[it] = False
+            #     if rpos and rprev \
+            #         and ((rpos0+r0 and not rprev0) or (not rpos0 and rprev0+r0)):
+            #             vt[it] = False
+            #     # if not (rpos and rprev):
+            #     #     vt[it] = not ((((rpos0>0) ^ rpos) or ((rprev0>0) ^ rprev)) \
+            #     #         and ((rpos0+r0>0) ^ rpos or ((rprev0>0) ^ rprev)) \
+            #     #         and ((rpos0>0) ^ rpos or ((rprev0+r0>0) ^ rprev)))
+            #     # r0 es un comodín, puede contarse como rebote antes o después del frame actual del vídeo 1 para validar la intersección
+        t = t[vt]
+        
+        if t.shape[0] == 0:  # Se han descartado todas las intersecciones
+            count += 1
+            continue
+
+        # Si hay más de una intersección, escoger la más cercana al centro de la polilínea
+        argt = np.argmin(np.abs(t-(timestamps1[idx]+offset)))
+        local_offset[idx] = t[argt]
+
+    # Mean of local_offset to estimate global offset and fps ratio
+    valid_mask = ~np.isnan(local_offset)
+    if np.sum(valid_mask) < 2:
+        print("No hay suficientes puntos válidos para refinar el desfase")
+        return offset  # No hay suficientes puntos para refinar
+
+    # Show type of values in local_offset
+    nan_count = np.sum(np.isnan(local_offset))
+    int_count = np.sum(~np.isnan(local_offset) & (local_offset == local_offset.astype(np.int32)))
+    float_count = np.sum(~np.isnan(local_offset) & (local_offset != local_offset.astype(np.int32)))
+    total_count = len(local_offset)
+    print(f'{nan_count}/{total_count} NaN values in local offset refinement')
+    print(f'{int_count}/{total_count} integer values in local offset refinement')
+    print(f'{float_count}/{total_count} floating point values in local offset refinement')
+    print(f'{count}/{total_count} invalid values in local offset refinement by rebounds')
+
+    local_offset[valid_mask] -= timestamps1[valid_mask]
+
+    # Remove outliers from local_offset
+    inliers = filter_outliers_iqr(local_offset[valid_mask])
+    print(f'{np.sum(~inliers)}/{np.sum(valid_mask)} outliers removed')
+
+    refined_offset = np.mean(local_offset[valid_mask][inliers])
+
+    if save_correspondences is not None:
+        local_offset[valid_mask] += timestamps1[valid_mask]
+        pd.DataFrame({'frame': np.arange(homog_points1.shape[1]), 'offset': np.searchsorted(timestamps1, local_offset, side='left')}).to_csv(save_correspondences, index=False, na_rep='nan')
+    return refined_offset
 
 def sync_positions(homog_points1, homog_points2, offset, fps_ratio):
     """ 

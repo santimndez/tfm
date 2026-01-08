@@ -1,7 +1,8 @@
-from turtle import pos
 import numpy as np
 from filterpy.kalman import UnscentedKalmanFilter, MerweScaledSigmaPoints
 from scipy.integrate import solve_ivp
+
+from .binocular import triangulate_ball
 
 import matplotlib.pyplot as plt
 
@@ -22,22 +23,17 @@ MU = 0.3                     # Friction coefficient
 M = 2.7e-3                   # Ball mass (kg)
 R = BALL_RADIUS / 100        # Ball radius (m)
 
-# Variables globales para la detección de rebotes
-# bounce_counter = 0
-# x_bounce = np.zeros((10, 4)) # La última fila es el momento del bote
-# track_bounces=True
-
 def get_alpha(v, w, MU=MU, COR=COR, R=R):
     return np.nan_to_num((MU * (1+COR) * np.abs(v[2])) / np.linalg.norm(v[:2]+w[:2]*np.array((-R, R))), nan=0.0)
 
-def coulomb_friction(v, w, thres=0.4):
+def coulomb_friction(v, w, thres=0.4, MU=MU, COR=COR, R=R):
     """
     Computes the velocity and spin of the ball after the bounce using the Coulomb friction model described in TT3D article.
     :param v: Ball velocity before bounce (3,).
     :param w: Ball spin euler vector before bounce (3,).
     :return v_, w_: ball velocity and spin after bounce (3,).
     """
-    alpha = get_alpha(v, w)
+    alpha = get_alpha(v, w, MU=MU, COR=COR, R=R)
     alpha = min(alpha, thres)
 
     A = np.diag([1-alpha, 1-alpha, -COR])
@@ -88,7 +84,7 @@ def ball_ode(t, y, R=R, M=M, KD=KD, KM=KM, G=G):
     dvdt = (KD * np.linalg.norm(v) * v + KM * np.cross(w, v)) / M + G
     dwdt = np.zeros(3)  # Assuming no change in spin
 
-    return np.hstack([v, dvdt, dwdt])
+    return np.hstack((v, dvdt, dwdt))
 
 def detect_bounce(t, y, terminal=True, direction=-1, R=R): # Length in meters
     """ Event function to detect ball falling to table height (possible bounces). """
@@ -125,15 +121,6 @@ def fx(x, dt, R=R, TABLE_WIDTH=0.01*TABLE_WIDTH, TABLE_LENGTH=0.01*TABLE_LENGTH)
 
         # Check bounce on the table
         if np.all(y_bounce[:2]>=0) and np.all(y_bounce[:2]<=[TABLE_WIDTH, TABLE_LENGTH]):
-            if np.abs(y_bounce[2]-R) > 2*R:
-                print(f"?{y_bounce}")
-            # if track_bounces:  # Set global variables
-            #     x_bounce[:-1, bounce_counter] = y_bounce.copy()
-            #     x_bounce[-1, bounce_counter] = t_bounce
-            #     bounce_counter += 1
-            #     if x_bounce.shape[1] <= bounce_counter:
-            #         x_bounce = np.hstack((x_bounce, np.zeros_like(x_bounce)))
-
             # Set initial values after the bounce
             y_bounce[3:6], y_bounce[6:] = coulomb_friction(y_bounce[3:6], y_bounce[6:]) # v and w after the bounce
             # y_bounce[2] = R # height after bounce is the radius of the ball
@@ -193,12 +180,12 @@ def initialize_UKF(UKF, pos=np.array([0.005*TABLE_WIDTH, 0.005*TABLE_LENGTH, 0.0
     UKF.x[3:6] = np.zeros((3,)) # Velocidad inicial
     UKF.x[6:] = np.zeros((3,))  # Rotación inicial
     # Incertidumbre inicial
-    UKF.P = np.diag([2.0, 2.0, 2.0,         # Posición: 4m
+    UKF.P = np.diag([0.5, 0.5, 0.5,         # Posición: 0.5m
                      108.0, 108.0, 108.0,   # v: 108 m/s = 30 km/h 
                      100.0, 100.0, 100.0])  # w: 100 rad/s
     UKF.P *= UKF.P # Pasar de desviación típica a varianza
 
-def estimate_trajectory(homog_points1, homog_points2, t_1, t_2, M1, M2, shape1, shape2, loglikelihood_thres=-1e5):
+def estimate_trajectory(homog_points1, homog_points2, t_1, t_2, M1, M2, shape1, shape2, loglikelihood_thres=-5e3):
     """
     Estima la trayectoria de la pelota utilizando un UKF.
     :param homog_points1: Puntos de la primera cámara en coordenadas homogéneas. La 3ª coordenada es 0 si el punto es inválido y 1 si es válido.
@@ -222,85 +209,80 @@ def estimate_trajectory(homog_points1, homog_points2, t_1, t_2, M1, M2, shape1, 
     camera_indices = np.hstack((np.zeros(len(t_1)), np.ones(len(t_2))))
     perm = np.argsort(timestamps)
 
-    measurements = np.vstack((points, timestamps, camera_indices))
+    measurements = np.vstack((points, timestamps, camera_indices)) # Measurements for the filter
     measurements = measurements[:, perm]
     measurements = np.delete(measurements[:, measurements[2] != 0], 2, axis=0) # Remove invalid points
     t = measurements[2, :].copy()
-    measurements[2, :] = np.diff(measurements[2, :], prepend=0) # Get time increments
-
+    measurements[2, 1:] = np.diff(measurements[2, :]) # Get time increments
+    measurements[2, 0] = 1e-2 # A dt of zero causes fatal inestability
     R = [np.diag(shape1)*0.02, np.diag(shape2)*0.02] # Ball detection noise for each camera in pixels
 
-    initialize_UKF(UKF) # TODO: Posición inicial a partir de una o dos cámaras
+    i = 0 # Loop index
+
+    # Get initial ball position from the first two consecutive measures with different cameras
+    j = next((j for j in range(1, measurements.shape[1]) if measurements[3, j] != measurements[3, 0]), measurements.shape[1])
+    if j != measurements.shape[1]:
+        pos = 0.01*triangulate_ball(measurements[:2, j-1:j], measurements[:2, j:j+1], 
+                               M2 if measurements[3, j-1] else M1,
+                               M2 if measurements[3, j] else M1)[:3, 0]
+        i = j+1
+        initialize_UKF(UKF, pos=pos)
+        print(f"Initial estimation\n{measurements[:2, j-1]}, (C{int(measurements[3, j-1]+1)}), {measurements[:2, j]}(C{int(measurements[3, j]+1)})\n{pos}, t={t[j-1]}, {t[j]}")
+    else:
+        initialize_UKF(UKF)
     X = np.zeros((measurements.shape[1]+1, UKF.x.shape[0])) # Array of estimations
-    X[0, :] = UKF.x.copy()
-    covariances = np.zeros((measurements.shape[1]+1, UKF.P.shape[0], UKF.P.shape[1]))
-    covariances[0, :, :] = UKF.P.copy()
-    smoothed_x = np.zeros((measurements.shape[1], UKF.x.shape[0]))
+    covariances = np.zeros((measurements.shape[1]+1, UKF.P.shape[0], UKF.P.shape[1])) # Array of estimation covariances
+    smoothed_x = np.zeros((measurements.shape[1], UKF.x.shape[0])) # Array of smoothed estimations
     loglikelihoods = np.zeros((measurements.shape[1],))
+    for k in range(0, i+1):
+        X[k, :] = UKF.x.copy()
+        covariances[k, :, :] = UKF.P.copy()
+        smoothed_x[k, :] = UKF.x.copy()
     rebounds = []
     bounces = []
-    last_rebound = 0
 
-    i = 0
+    last_rebound = i
     while i < measurements.shape[1]:
-        UKF.Q = getQ(dt=measurements[2, i], sigma_a=0.1)
-        UKF.R = R[int(measurements[3, i])]
-        UKF.predict(dt=measurements[2, i])
-        update(UKF, pos2d=measurements[:2, i], dt=measurements[2, i], M=M2 if measurements[3, i] else M1)
-        loglikelihoods[i] = UKF.log_likelihood
-        if (UKF.log_likelihood<loglikelihood_thres and last_rebound+1 < i) or i==measurements.shape[1]-1:
-            if False:
-                # Plot loglikelihoods
-                plt.plot(loglikelihoods[last_rebound:i+1])
-                plt.axhline(y=loglikelihood_thres, color='r', linestyle='--')
-                plt.xlabel('Measurement')
-                plt.ylabel('Log-Likelihood')
-                plt.title('UKF Log-Likelihood')
-                plt.show()
+        # Find next point from the other camera
+        j = next((j for j in range(i+1, measurements.shape[1]) if measurements[3, j] != measurements[3, i]), measurements.shape[1]-1)
+        for k in range(i, j+1):  # Process batch
+            UKF.Q = getQ(dt=measurements[2, k], sigma_a=0.1)
+            UKF.R = R[int(measurements[3, k])]
+            UKF.predict(dt=measurements[2, k])
+            update(UKF, pos2d=measurements[:2, k], dt=measurements[2, k], M=M2 if measurements[3, k] else M1)
+            loglikelihoods[k] = UKF.log_likelihood
+            X[k+1, :] = UKF.x.copy()
+            covariances[k+1, :, :] = UKF.P.copy()
+        if (UKF.log_likelihood<loglikelihood_thres and last_rebound+1 < j) or j==measurements.shape[1]-1:
             # Get speed and spin
-            rebounds.append(i)
-            print(f"REBOUND\nMeasure: {i}\nPosition: {X[i, :3]}\nTime: {t[i]}\nSpeed: {X[i, 3:6]}\nSpin: {X[i, 6:]} ({np.linalg.norm(X[i, 6:])/(2*np.pi)} rps)\nLikelihood: {UKF.log_likelihood}")
+            rebounds.append(j)
+            print(f"REBOUND\nMeasure: {j}, {measurements[:, j]}\nPosition: {X[j, :3]}\nTime: {t[j]}\nSpeed: {X[j, 3:6]}\nSpin: {X[j, 6:]} ({np.linalg.norm(X[j, 6:])/(2*np.pi)} rps)\nLikelihood: {UKF.log_likelihood}")
             # Recalculate trajectory with UKF backward pass
             try:
-                # track_bounces = False
-                smoothed_x[last_rebound:i, :], _, _ = UKF.rts_smoother(Xs=X[last_rebound+1:i+1, :], Ps=covariances[last_rebound+1:i+1, :, :], 
-                                                    Qs=np.stack([getQ(dt=measurements[2, j], sigma_a=0.1) for j in range(last_rebound, i)], axis=0),
-                                                    dts=measurements[2, last_rebound:i])
-                # track_bounces = True
+                smoothed_x[last_rebound:j, :], _, _ = UKF.rts_smoother(Xs=X[last_rebound+1:j+1, :], Ps=covariances[last_rebound+1:j+1, :, :], 
+                                                    Qs=np.stack([getQ(dt=measurements[2, k], sigma_a=0.1) for k in range(last_rebound, j)], axis=0),
+                                                    dts=measurements[2, last_rebound:j])
             except np.linalg.LinAlgError:
                 print(f"np.linalg.LinAlgError on measure {i}")
                 # print("Measurements")
-                # print(measurements[2, last_rebound:i])
+                # print(measurements[2, last_rebound:j])
                 # print("Estimates")
-                # print(X[last_rebound+1:i+1, :])
+                # print(X[last_rebound+1:j+1, :])
                 # print("Covariances")
-                # print(covariances[last_rebound+1:i+1, :, :])
-                smoothed_x[last_rebound:i, :] = X[last_rebound+1:i+1, :]
+                # print(covariances[last_rebound+1:j+1, :, :])
+                smoothed_x[last_rebound:j, :] = X[last_rebound+1:j+1, :]
             # Reset UKF
-            if i < measurements.shape[1]-1:
+            if j < measurements.shape[1]-1:
                 UKF = Ball_UKF(M1=M1, M2=M2)
-                initialize_UKF(UKF, pos=smoothed_x[i-1, :3])
-                # print(f"Estimación inicial: {UKF.x}")
-                last_rebound = i
-                i -= 1  # Reprocess this measurement
-        else:
-            X[i+1, :] = UKF.x.copy()
-            covariances[i+1, :, :] = UKF.P.copy()
-            # for j in range(bounce_counter):
-            #     bounces.append(x_bounce[:, j].copy())
-            #     print(f"BOUNCE\nMeasure: {i}\nTime: {t[i-1] + x_bounce[-1, j]}\nSpeed: {x_bounce[3:6, j]}\nSpin: {x_bounce[6:9, j]} ({np.linalg.norm(x_bounce[6:9, j]/(2*np.pi))} rps)")
-
+                initialize_UKF(UKF, pos=X[i, :3]) # smoothed_x[j-1, :3])
+                print(f"Estimación inicial: {UKF.x}")
+                last_rebound = j
+                # Reprocess measure (i is not incremented)
+                continue
         # bounce_counter = 0
-        if i%100==0:
-            print(f"Processing measurement {i}")
-        i += 1
-
-    # Get predicted state
-    # pos = UKF.x[:3]  # in meters
-    # vel = UKF.x[3:6]  # in m/s
-    # rot = UKF.x[6:]   # in radians    
+        i = j+1
 
     # print("Estimaciones UKF")
-    # print(np.hstack((X[:100, :3], measurements[:, :100].T)))
-    # print(rebounds)
+    # print(np.hstack((t[80:, np.newaxis], X[80:t.shape[0], :3], loglikelihoods[80:t.shape[0], np.newaxis])))
+
     return smoothed_x.T, t, rebounds, bounces, UKF, X.T

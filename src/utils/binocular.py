@@ -63,8 +63,8 @@ def get_fundamental_matrix(M1, M2, C1):
 def triangulate_ball(homog_points1, homog_points2, M1, M2):
     """
     Obtener la trayectoria 3D de la pelota por triangulación
-    :param homog_points1: puntos homogéneos de la pelota en la cámara 1 (3xN)
-    :param homog_points2: puntos homogéneos de la pelota en la cámara 2 (3xN)
+    :param homog_points1: puntos homogéneos de la pelota en la cámara 1 (3xN).
+    :param homog_points2: puntos homogéneos de la pelota en la cámara 2 (3xN). Si este y el anterior son (2xN) se asume coordenada homogénea 1.
     :param M1: matriz de proyección de la cámara 1 (3x4)
     :param M2: matriz de proyección de la cámara 2 (3x4)
     :return: trayectoria 3D de la pelota en coordenadas homogéneas (4xN)
@@ -72,5 +72,6 @@ def triangulate_ball(homog_points1, homog_points2, M1, M2):
     trajectory = cv.triangulatePoints(M1, M2, homog_points1[:2, :], homog_points2[:2, :])
     trajectory /= trajectory[3, :]  # Convertir a coordenadas homogéneas
     trajectory = np.nan_to_num(trajectory, nan=0.0, posinf=0.0, neginf=0.0)
-    trajectory[:, homog_points1[2, :] * homog_points2[2, :] == 0] = 0  # Marcar como no válidos los puntos no detectados en alguna cámara
+    if homog_points1.shape[0] > 2:
+        trajectory[:, homog_points1[2, :] * homog_points2[2, :] == 0] = 0  # Marcar como no válidos los puntos no detectados en alguna cámara
     return trajectory
