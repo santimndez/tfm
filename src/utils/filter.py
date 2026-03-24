@@ -185,7 +185,7 @@ def initialize_UKF(UKF, pos=np.array([0.005*TABLE_WIDTH, 0.005*TABLE_LENGTH, 0.0
                      100.0, 100.0, 100.0])  # w: 100 rad/s
     UKF.P *= UKF.P # Pasar de desviación típica a varianza
 
-def estimate_trajectory(homog_points1, homog_points2, t_1, t_2, M1, M2, shape1, shape2, loglikelihood_thres=-5e3):
+def estimate_trajectory(homog_points1, homog_points2, t_1, t_2, M1, M2, shape1, shape2, loglikelihood_thres=-5e6):
     """
     Estima la trayectoria de la pelota utilizando un UKF.
     :param homog_points1: Puntos de la primera cámara en coordenadas homogéneas. La 3ª coordenada es 0 si el punto es inválido y 1 si es válido.
@@ -245,6 +245,10 @@ def estimate_trajectory(homog_points1, homog_points2, t_1, t_2, M1, M2, shape1, 
     while i < measurements.shape[1]:
         # Find next point from the other camera
         j = next((j for j in range(i+1, measurements.shape[1]) if measurements[3, j] != measurements[3, i]), measurements.shape[1]-1)
+        # Triangulate position to detect strokes
+        pos = 0.01*triangulate_ball(measurements[:2, j-1:j], measurements[:2, j:j+1], 
+                           M2 if measurements[3, j-1] else M1,
+                           M2 if measurements[3, j] else M1)[:3, 0]
         for k in range(i, j+1):  # Process batch
             UKF.Q = getQ(dt=measurements[2, k], sigma_a=0.1)
             UKF.R = R[int(measurements[3, k])]
@@ -253,10 +257,11 @@ def estimate_trajectory(homog_points1, homog_points2, t_1, t_2, M1, M2, shape1, 
             loglikelihoods[k] = UKF.log_likelihood
             X[k+1, :] = UKF.x.copy()
             covariances[k+1, :, :] = UKF.P.copy()
-        if (UKF.log_likelihood<loglikelihood_thres and last_rebound+1 < j) or j==measurements.shape[1]-1:
+        if (((pos[1]-X[i, 1])*(X[i, 1]-X[i-1, 1])<0 or UKF.log_likelihood<loglikelihood_thres) and last_rebound+1 < j) or j==measurements.shape[1]-1:
             # Get speed and spin
             rebounds.append(j)
             print(f"REBOUND\nMeasure: {j}, {measurements[:, j]}\nPosition: {X[j, :3]}\nTime: {t[j]}\nSpeed: {X[j, 3:6]}\nSpin: {X[j, 6:]} ({np.linalg.norm(X[j, 6:])/(2*np.pi)} rps)\nLikelihood: {UKF.log_likelihood}")
+            print(f"Triangulation: {pos}, pos i: {X[i, :3]}, pos i-1: {X[i-1, :3]}")
             # Recalculate trajectory with UKF backward pass
             try:
                 smoothed_x[last_rebound:j, :], _, _ = UKF.rts_smoother(Xs=X[last_rebound+1:j+1, :], Ps=covariances[last_rebound+1:j+1, :, :], 

@@ -10,7 +10,7 @@ from utils.ball_detection import *
 from utils.sync import *
 from utils.filter import estimate_trajectory
 from utils.tt_animation import ball_animation
-
+from utils.trajectory_segmentation import dp_segmenter, DEFAULT_LOSS
 PROFILING = True
 
 # Argumentos de la línea de comandos
@@ -31,22 +31,6 @@ args = parser.parse_args()
 
 video_files = args.input
 
-K = [None, None]  # Matrices de cámara
-distortion = [None, None]  # Coeficientes de distorsión
-
-if args.k is None: # Matriz de cámara por defecto
-    camera_matrix = np.array([[1.69281160e+03, 0.00000000e+00, 6.81281341e+02],
-                              [0.00000000e+00, 1.68036637e+03, 9.03147730e+02],
-                              [0.00000000e+00, 0.00000000e+00, 1.00000000e+00]])
-    K = [camera_matrix, camera_matrix]
-    distortion = [np.array([0.13225064, -0.27888641, -0.00721176,  0.03960687, -0.17568582])] * 2
-else:
-    for i in range(2):
-        with open(args.k[i], 'r') as file:
-            lines = file.readlines()
-            K[i] = np.fromstring(''.join(lines[:3]), sep=' ').reshape((3, 3))
-            distortion[i] = np.fromstring(lines[3], sep=' ')
-
 # Esquinas de la mesa en el sistema de coordenadas de la cámara en cm
 TABLE_WIDTH = 152.5
 TABLE_LENGTH = 274.0
@@ -59,7 +43,38 @@ refs = np.array([[0, 0, 0],
                  [TABLE_WIDTH, 0, 0], 
                  [TABLE_WIDTH, TABLE_LENGTH, 0], 
                  [0, TABLE_LENGTH, 0]], dtype=np.float32) # Esquinas en orden antihorario
-points = pd.read_csv(args.ref_points, header=None).values.reshape((2, 4, 2)).astype(np.float32)
+aux = pd.read_csv(args.ref_points, header=None).values.reshape((2, 8, 2)).astype(np.float32)
+points = aux[:, :4, :]
+vertical_points = aux[:, 4:, :]
+
+camera_center = [np.array(get_frame_shape(video))/2 for video in args.input]
+K = [None, None]  # Matrices de cámara
+distortion = [None, None]  # Coeficientes de distorsión
+
+if args.k is None: 
+    # Matriz de cámara por defecto
+    # camera_matrix = np.array([[1.69281160e+03, 0.00000000e+00, 6.81281341e+02],
+    #                           [0.00000000e+00, 1.68036637e+03, 9.03147730e+02],
+    #                           [0.00000000e+00, 0.00000000e+00, 1.00000000e+00]])
+    # K = [camera_matrix, camera_matrix]
+    # distortion = [np.array([0.13225064, -0.27888641, -0.00721176,  0.03960687, -0.17568582])] * 2
+    K = [get_camera_matrix(points[i, :, :], np.roll(points[i, :, :], 1, axis=0), vertical_points[i, :, :], camera_center[i]) for i in range(2)]
+    distortion = [np.zeros((5,))] * 2
+else:
+    for i in range(2):
+        with open(args.k[i], 'r') as file:
+            lines = file.readlines()
+            K[i] = np.fromstring(''.join(lines[:3]), sep=' ').reshape((3, 3))
+            distortion[i] = np.fromstring(lines[3], sep=' ')
+
+print("Matrices de calibración:")
+for i in range(2):
+    print(f"Vídeo {i + 1}:")
+    print("Matriz de cámara:")
+    print(K[i])
+    print("Coeficientes de distorsión:")
+    print(distortion[i])
+    print("")
 
 # Calcular fps
 videos = [cv.VideoCapture(video) for video in args.input]
@@ -151,6 +166,7 @@ if args.output is not None:
     print(f'El vídeo final ha sido creado en: {args.output} ({toc - tic:.2f} segundos)')
 
 APPLY_FILTERING = True
+TRAJECTORY_SEGMENTATION = True
 if not APPLY_FILTERING:
     # Calcular la posición 3D de la pelota y guardarla en un archivo CSV
     homog_points1, homog_points2 = sync_positions(homog_points1, homog_points2, offset, fps_ratio=1.0)
@@ -162,8 +178,22 @@ if not APPLY_FILTERING:
 
     # Crea una animación (vídeo) 3D de la trayectoria de la pelota sobre la mesa
     ball_animation(trajectory)
-
 else:
+    # Segmentación de la trayectoria
+    if TRAJECTORY_SEGMENTATION:
+        tic = time.time()
+        # Escalar la trayectoria
+        homog_points1_scaled = homog_points1[:2, homog_points1[2, :] != 0].T / np.array(get_frame_shape(video_files[0]))
+        homog_points2_scaled = homog_points2[:2, homog_points2[2, :] != 0].T / np.array(get_frame_shape(video_files[1]))
+        segments = dp_segmenter(timestamps1[homog_points1[2, :] != 0], homog_points1_scaled)
+        segments2 = dp_segmenter(timestamps2[homog_points2[2, :] != 0], homog_points2_scaled)
+        toc = time.time()
+        print(f'Segmentación de la trayectoria ({toc - tic:.2f} segundos)')
+        print(f'Segmentos obtenidos: {len(segments)} en el vídeo 1, {len(segments2)} en el vídeo 2')
+        # Guardar los segmentos en un archivo CSV
+        pd.DataFrame(segments).to_csv(f"data/segments/ball_trajectory_segments_L{DEFAULT_LOSS}.csv", index=False, header=None)
+        pd.DataFrame(segments2).to_csv(f"data/segments/ball_trajectory_segments2_L{DEFAULT_LOSS}.csv", index=False, header=None)
+        print(f"Segmentos guardados en: data/segments/ball_trajectory_segments_L{DEFAULT_LOSS}.csv y data/segments/ball_trajectory_segments2_L{DEFAULT_LOSS}.csv")
     # Estimar la trayectoria de la pelota utilizando un filtro UKF
     timestamps1 += refined_offset_seconds # Aplicar el offset a los timestamps
     

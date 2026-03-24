@@ -8,8 +8,10 @@ def inhomog(homog_points):  # Convertir a coordenadas cartesianas (vector vertic
     return homog_points[:2, :] / homog_points[2, :][np.newaxis, :]
 
 def line_p2p(h1, h2):
-    # Calcular la ecuación de la recta que pasa por dos puntos dados en coordenadas homogéneas
-    # Si h1 es un array de puntos (por columnas), entonces devuelve un array de rectas (por filas)
+    """
+    Calcular la ecuación de la recta que pasa por dos puntos dados en coordenadas homogéneas.
+    Si h1 es un array de puntos (por columnas), entonces devuelve un array de rectas (por filas).
+    """
     return np.cross(h1, h2, axisa=0, axisb=0)
 
 def get_epipolar_point(C, P):
@@ -32,7 +34,14 @@ def skew(v):
                      [-v[1], v[0], 0]])
 
 def get_projection_matrix(refs, points, camera_matrix, dist_coefs, ):
-    # Calcular la matriz de la cámara usando solvePnP
+    """
+    Calcula la matriz de la cámara usando solvePnP
+    :param refs: puntos de referencia 3D (Nx3)
+    :param points: puntos de imagen 2D (Nx2)
+    :param camera_matrix: matriz de cámara (3x3)
+    :param dist_coefs: coeficientes de distorsión (1x5)
+    :return: matriz de proyección (3x4)
+    """
     ok, rvec, tvec = cv.solvePnP(refs, points, camera_matrix, dist_coefs, flags=cv.SOLVEPNP_IPPE)
     if ok: # Refinamiento
         rvec, tvec = cv.solvePnPRefineVVS(refs, points, camera_matrix, dist_coefs, rvec, tvec)
@@ -42,6 +51,55 @@ def get_projection_matrix(refs, points, camera_matrix, dist_coefs, ):
     C = -np.linalg.solve(R, tvec)  # Centro de la cámara
 
     return M, R, tvec, C
+
+def get_camera_matrix(points1, points2, points3, c):
+    """
+    Obtiene la matriz de calibración de la cámara K a partir de 3 pares de puntos que permiten obtener un punto de fuga en 3 direcciones ortogonales.
+    :param points1: primer conjunto de puntos (4x2)
+    :param points2: segundo conjunto de puntos (4x2)
+    :param points3: tercer conjunto de puntos (4x2)
+    :param c: centro de la cámara en coordenadas 2D (2x1)
+    :return: matriz de calibración de la cámara K (3x3)
+    """
+    homog_points = [homog(p.T) for p in (points1, points2, points3)]
+    vp = [np.cross(line_p2p(p[:, 0:1], p[:, 1:2]), line_p2p(p[:, 2:3], p[:, 3:4])).squeeze() for p in homog_points]
+    for x in vp:
+        x /= x[2]
+    
+    # We assume K with no skew
+    # K = [[f, s=0,   cx],
+    #      [0, f_r, cy],
+    #      [0, 0,   1]]
+    # and the calibrating conic w has the form
+    # w = [[a, 0, -cx*a],
+    #      [0, b, -cy*b],
+    #      [-cx*a, -cy*b, 1+cx^2*a+cy^2*b]]
+
+    A = np.zeros((3, 2))
+    b = np.zeros((3, 1))
+    
+    # For each pair x, y of vanishing points of orthogonal directions, we obtain a linear equation for a, b, c, d given by x^T w y = 0
+    for (k, (i, j)) in enumerate(((0, 1), (0, 2), (1, 2))): 
+        A[k, :] = [vp[i][0]*vp[j][0]-c[0]*(vp[i][0]*vp[j][2] + vp[i][2]*vp[j][0]) + c[0]*c[0]*vp[i][2]*vp[j][2], 
+                   vp[i][1]*vp[j][1] -c[1]*(vp[i][1]*vp[j][2] + vp[i][2]*vp[j][1])+ c[1]*c[1]*vp[i][2]*vp[j][2]]
+        b[k, 0] = -vp[i][2]*vp[j][2]
+
+    ab = np.linalg.lstsq(A, b, rcond=None)[0]
+
+    # print(A)
+    # print(b)
+    # print(ab)
+
+    a, b = ab
+
+    K = np.zeros((3, 3))
+    K[0, 0] = np.sqrt(1/a)
+    K[1, 1] = np.sqrt(1/b)
+    K[0, 2] = c[0]
+    K[1, 2] = c[1]
+    K[2, 2] = 1.0
+
+    return K
 
 def get_fundamental_matrix(M1, M2, C1):
     """
