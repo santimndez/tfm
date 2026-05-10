@@ -171,7 +171,7 @@ def dp_segmenter(t, traj, L=DEFAULT_LOSS):
 
     :return: np.ndarray: Indices of segment boundaries.
 
-    Complexity: O(n^3)
+    Complexity: O(n^2)
     """
     n = len(t)
     print(f"Segmentando trayectoria: n={n}")
@@ -179,22 +179,23 @@ def dp_segmenter(t, traj, L=DEFAULT_LOSS):
     sse = np.full((n, n), np.inf)
     # coeffs = [[None]*n for _ in range(n)]
     for i in range(n):
-        for j in range(i, n):
+        sse[i, i] = 0.0  # SSE de un segmento de un solo punto es 0
+        for j in range(i+1, n):
             s, c = fit_quad_and_sse(t[i:j+1], traj[i:j+1])
             sse[i,j] = s
             # coeffs[i][j] = c
     print("SSE precomputada")
-    # dp[j] = mejor coste para prefix hasta j (incluyendo j), backpointer
+    # dp[j] = mejor coste para prefijo [0, j)
     dp = np.full(n+1, np.inf)
     dp[0] = 0.0
     prev = np.full(n+1, -1, dtype=int)
     for j in range(1, n+1):
         # try all possible previous cut i (1-based logic)
-        for i in range(1, j+1):
-            cost = dp[i-1] + sse[i-1, j-1] + L
+        for i in range(j):
+            cost = dp[i] + sse[i, j-1] + L
             if cost < dp[j]:
                 dp[j] = cost
-                prev[j] = i-1
+                prev[j] = i
 
     # reconstruct segments (indices en 0..n-1)
     breakpoints = []

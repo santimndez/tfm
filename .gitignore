@@ -2,6 +2,7 @@ __pycache__/
 *.jpg
 *.txt
 *.mp4
+*.pt
 *.csv
 results/
 src/data/

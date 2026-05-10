@@ -11,7 +11,7 @@ from utils.sync import *
 from utils.filter import estimate_trajectory
 from utils.tt_animation import ball_animation
 from utils.trajectory_segmentation import dp_segmenter, DEFAULT_LOSS
-PROFILING = True
+PROFILING = False
 
 # Argumentos de la línea de comandos
 parser = argparse.ArgumentParser(description='Sincronizar dos vídeos estéreo minimizando el error de reproyección de la segmentación de la pelota')
@@ -53,13 +53,13 @@ distortion = [None, None]  # Coeficientes de distorsión
 
 if args.k is None: 
     # Matriz de cámara por defecto
-    # camera_matrix = np.array([[1.69281160e+03, 0.00000000e+00, 6.81281341e+02],
-    #                           [0.00000000e+00, 1.68036637e+03, 9.03147730e+02],
-    #                           [0.00000000e+00, 0.00000000e+00, 1.00000000e+00]])
-    # K = [camera_matrix, camera_matrix]
-    # distortion = [np.array([0.13225064, -0.27888641, -0.00721176,  0.03960687, -0.17568582])] * 2
-    K = [get_camera_matrix(points[i, :, :], np.roll(points[i, :, :], 1, axis=0), vertical_points[i, :, :], camera_center[i]) for i in range(2)]
-    distortion = [np.zeros((5,))] * 2
+    camera_matrix = np.array([[1.69281160e+03, 0.00000000e+00, 6.81281341e+02],
+                              [0.00000000e+00, 1.68036637e+03, 9.03147730e+02],
+                              [0.00000000e+00, 0.00000000e+00, 1.00000000e+00]])
+    K = [camera_matrix, camera_matrix]
+    distortion = [np.array([0.13225064, -0.27888641, -0.00721176,  0.03960687, -0.17568582])] * 2
+    # K = [get_camera_matrix(points[i, :, :], np.roll(points[i, :, :], 1, axis=0), vertical_points[i, :, :], camera_center[i]) for i in range(2)]
+    # distortion = [np.zeros((5,))] * 2
 else:
     for i in range(2):
         with open(args.k[i], 'r') as file:
@@ -96,10 +96,9 @@ F = get_fundamental_matrix(M[0], M[1], C[0])  # Matriz fundamental
 if args.model is None and args.positions is None:
     raise ValueError('Debe proporcionar un modelo de segmentación (--model) o las posiciones de la pelota en cada frame (--positions)')
 
-model = YOLO(args.model, task='segment', verbose=False) if args.model is not None else None
-
 if args.model is not None: # Obtener las posiciones de la pelota usando el modelo de segmentación
     tic = time.time()
+    model = YOLO(args.model, task='segment', verbose=False)
     homog_points1 = get_ball_positions(video_files[0], model).T
     pd.DataFrame(homog_points1.T).to_csv('positions_video1.csv', index=False, header=None)
     toc = time.time()
@@ -129,7 +128,12 @@ if args.offset is not None:
     print(f'Usando desfase proporcionado: {offset} frames')
 else:
     tic = time.time()
+    
     offset, offset_loss = estimate_offset(F, homog_points1[:, :1800], homog_points2[:, :1800], args.max_offset)
+    
+    # offset, fps_ratio = refine_offset(F, homog_points1, homog_points2, 0, fps_ratio=fps[1]/fps[0], thres=args.max_offset)
+    offset_loss = np.nan * np.ones((2 * args.max_offset + 1,))
+
     offset = -offset    # Cambiar el signo para que sea negativo si hay que adelantar el primer vídeo
     offset_seconds = offset / fps[1]
     toc = time.time()
@@ -166,7 +170,8 @@ if args.output is not None:
     print(f'El vídeo final ha sido creado en: {args.output} ({toc - tic:.2f} segundos)')
 
 APPLY_FILTERING = True
-TRAJECTORY_SEGMENTATION = True
+TRAJECTORY_SEGMENTATION = False
+
 if not APPLY_FILTERING:
     # Calcular la posición 3D de la pelota y guardarla en un archivo CSV
     homog_points1, homog_points2 = sync_positions(homog_points1, homog_points2, offset, fps_ratio=1.0)
@@ -205,13 +210,14 @@ else:
 
     smoothed_X, t, rebounds, bounces, _, X = estimate_trajectory(homog_points1, homog_points2, timestamps1, timestamps2, M[0], M[1], get_frame_shape(video_files[0]), get_frame_shape(video_files[1]))
 
-
     print("Estimaciones UKF")
     print(X[:, :100].T)
     print("Suavizado")
     print(smoothed_X[:, :100].T)   
+    print("Rebotes")
+    print(rebounds)
 
     pd.DataFrame(np.hstack((smoothed_X.T, t[:, np.newaxis]))).to_csv('ball_trajectory_3D.csv', index=False, header=None)
     print(f'Trayectoria 3D de la pelota guardada en ball_trajectory_3D.csv')
 
-    ball_animation(100*X[:3, :], t)
+    ball_animation(smoothed_X, t)

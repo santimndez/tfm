@@ -2,7 +2,6 @@ import cv2 as cv
 import argparse
 import numpy as np
 import os
-from convert import convert_points
 
 parser = argparse.ArgumentParser(usage=
 """

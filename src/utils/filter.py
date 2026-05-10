@@ -1,10 +1,9 @@
 import numpy as np
 from filterpy.kalman import UnscentedKalmanFilter, MerweScaledSigmaPoints
+from filterpy.common import Q_continuous_white_noise
 from scipy.integrate import solve_ivp
 
 from .binocular import triangulate_ball
-
-import matplotlib.pyplot as plt
 
 # Esquinas de la mesa en el sistema de coordenadas de la cámara en cm
 TABLE_WIDTH = 152.5
@@ -121,8 +120,8 @@ def fx(x, dt, R=R, TABLE_WIDTH=0.01*TABLE_WIDTH, TABLE_LENGTH=0.01*TABLE_LENGTH)
 
         # Check bounce on the table
         if np.all(y_bounce[:2]>=0) and np.all(y_bounce[:2]<=[TABLE_WIDTH, TABLE_LENGTH]):
-            # Set initial values after the bounce
-            y_bounce[3:6], y_bounce[6:] = coulomb_friction(y_bounce[3:6], y_bounce[6:]) # v and w after the bounce
+            # Set initial values v and w after the bounce
+            y_bounce[3:6], y_bounce[6:] = coulomb_friction(y_bounce[3:6], y_bounce[6:])
             # y_bounce[2] = R # height after bounce is the radius of the ball
 
         sol = solve_ivp(
@@ -164,12 +163,17 @@ def Ball_UKF(M1, M2):
 
 # Predicción de la trayectoria de la pelota usando el UKF Ball_UKF
 
-def getQ(dt, sigma_a=0.1):
-    # TODO: Establecer Q con sentido en función de dt
+def getQ(dt, sigma_v=0.1, sigma_w=5.0):
+    """
+    Genera la matriz de covarianza del proceso Q para el UKF.
+    :param dt: Tamaño del paso de tiempo (s)
+    :param sigma_v: Desviación estándar del ruido de velocidad (m/s^2) para dt=1s (densidad espectral)
+    :param sigma_w: Desviación estándar del ruido de rotación (rad/s^2) para dt=1s (densidad espectral)
+    :return: Matriz de covarianza del proceso Q (9, 9)
+    """
     Q = np.zeros((9, 9))
-    Q[0:3, 0:3] = sigma_a**2 * np.eye(3) * dt**4 / 4
-    Q[3:6, 3:6] = sigma_a**2 * np.eye(3) * dt**2
-    Q[6:9, 6:9] = sigma_a**2 * np.eye(3) * dt**2
+    Q[0:6, 0:6] = sigma_v**2 * Q_continuous_white_noise(dim=2, dt=dt, spectral_density=sigma_v**2, block_size=3, order_by_dim=False)
+    Q[6:9, 6:9] = sigma_w**2 * dt**2 * np.eye(3)
     return Q
 
 def update(UKF, pos2d, dt, M):
@@ -180,12 +184,12 @@ def initialize_UKF(UKF, pos=np.array([0.005*TABLE_WIDTH, 0.005*TABLE_LENGTH, 0.0
     UKF.x[3:6] = np.zeros((3,)) # Velocidad inicial
     UKF.x[6:] = np.zeros((3,))  # Rotación inicial
     # Incertidumbre inicial
-    UKF.P = np.diag([0.5, 0.5, 0.5,         # Posición: 0.5m
-                     108.0, 108.0, 108.0,   # v: 108 m/s = 30 km/h 
+    UKF.P = np.diag([0.5, 0.5, 0.5,         # Posición: 0.5 m
+                     216.0, 216.0, 216.0,   # v: 216 m/s = 60 km/h 
                      100.0, 100.0, 100.0])  # w: 100 rad/s
     UKF.P *= UKF.P # Pasar de desviación típica a varianza
 
-def estimate_trajectory(homog_points1, homog_points2, t_1, t_2, M1, M2, shape1, shape2, loglikelihood_thres=-5e6):
+def estimate_trajectory(homog_points1, homog_points2, t_1, t_2, M1, M2, shape1, shape2, mahalanobis_thres=7, min_rebound_lapse=0.07):
     """
     Estima la trayectoria de la pelota utilizando un UKF.
     :param homog_points1: Puntos de la primera cámara en coordenadas homogéneas. La 3ª coordenada es 0 si el punto es inválido y 1 si es válido.
@@ -196,10 +200,11 @@ def estimate_trajectory(homog_points1, homog_points2, t_1, t_2, M1, M2, shape1, 
     :param M2: Matriz de proyección de la segunda cámara.
     :param shape1: Tamaño (w, h) de la imagen de la primera cámara.
     :param shape2: Tamaño (w, h) de la imagen de la segunda cámara.
-    :param likelihood_thres: Umbral de log-verosimilitud para considerar que ha habido un rebote y reiniciar el UKF.
+    :param mahalanobis_thres: Umbral de Mahalanobis para considerar que ha habido un rebote y reiniciar el UKF.
+    :param min_rebound_lapse: Tiempo mínimo entre rebotes.
     :return: Matriz de estados estimados (10, N), tiempos correpondientes (N,), índices de rebotes (no en la mesa), estados en los botes en la mesa, UKF final
     """
-    global bounce_counter, x_bounce
+    # global bounce_counter, x_bounce
 
     UKF = Ball_UKF(M1=M1, M2=M2)
 
@@ -215,12 +220,13 @@ def estimate_trajectory(homog_points1, homog_points2, t_1, t_2, M1, M2, shape1, 
     t = measurements[2, :].copy()
     measurements[2, 1:] = np.diff(measurements[2, :]) # Get time increments
     measurements[2, 0] = 1e-2 # A dt of zero causes fatal inestability
-    R = [np.diag(shape1)*0.02, np.diag(shape2)*0.02] # Ball detection noise for each camera in pixels
+    R = [np.diag(shape1)*0.01, np.diag(shape2)*0.01] # Ball detection noise for each camera in pixels
 
     i = 0 # Loop index
 
     # Get initial ball position from the first two consecutive measures with different cameras
     j = next((j for j in range(1, measurements.shape[1]) if measurements[3, j] != measurements[3, 0]), measurements.shape[1])
+    pos = np.array([0.005*TABLE_WIDTH, 0.005*TABLE_LENGTH, 0.02*NET_HEIGHT])
     if j != measurements.shape[1]:
         pos = 0.01*triangulate_ball(measurements[:2, j-1:j], measurements[:2, j:j+1], 
                                M2 if measurements[3, j-1] else M1,
@@ -246,26 +252,28 @@ def estimate_trajectory(homog_points1, homog_points2, t_1, t_2, M1, M2, shape1, 
         # Find next point from the other camera
         j = next((j for j in range(i+1, measurements.shape[1]) if measurements[3, j] != measurements[3, i]), measurements.shape[1]-1)
         # Triangulate position to detect strokes
+        prev_pos = pos
         pos = 0.01*triangulate_ball(measurements[:2, j-1:j], measurements[:2, j:j+1], 
                            M2 if measurements[3, j-1] else M1,
                            M2 if measurements[3, j] else M1)[:3, 0]
         for k in range(i, j+1):  # Process batch
-            UKF.Q = getQ(dt=measurements[2, k], sigma_a=0.1)
+            UKF.Q = getQ(dt=measurements[2, k])
             UKF.R = R[int(measurements[3, k])]
             UKF.predict(dt=measurements[2, k])
             update(UKF, pos2d=measurements[:2, k], dt=measurements[2, k], M=M2 if measurements[3, k] else M1)
-            loglikelihoods[k] = UKF.log_likelihood
+            loglikelihoods[k] = UKF.mahalanobis
             X[k+1, :] = UKF.x.copy()
             covariances[k+1, :, :] = UKF.P.copy()
-        if (((pos[1]-X[i, 1])*(X[i, 1]-X[i-1, 1])<0 or UKF.log_likelihood<loglikelihood_thres) and last_rebound+1 < j) or j==measurements.shape[1]-1:
+        # if (((pos[1]-prev_pos[1])*(X[i, 4])<0 or UKF.log_likelihood<loglikelihood_thres) and last_rebound+1 < j) or j==measurements.shape[1]-1:
+        if (((pos[1]-prev_pos[1])*(X[i, 4])<0 or UKF.mahalanobis>mahalanobis_thres) and t[last_rebound] + min_rebound_lapse < t[j]) or j==measurements.shape[1]-1:
             # Get speed and spin
             rebounds.append(j)
-            print(f"REBOUND\nMeasure: {j}, {measurements[:, j]}\nPosition: {X[j, :3]}\nTime: {t[j]}\nSpeed: {X[j, 3:6]}\nSpin: {X[j, 6:]} ({np.linalg.norm(X[j, 6:])/(2*np.pi)} rps)\nLikelihood: {UKF.log_likelihood}")
+            print(f"REBOUND\nMeasure: {j}, {measurements[:, j]}\nPosition: {X[j, :3]}\nTime: {t[j]}\nSpeed: {X[j, 3:6]}\nSpin: {X[j, 6:]} ({np.linalg.norm(X[j, 6:])/(2*np.pi)} rps)\nLikelihood: {UKF.mahalanobis}")
             print(f"Triangulation: {pos}, pos i: {X[i, :3]}, pos i-1: {X[i-1, :3]}")
             # Recalculate trajectory with UKF backward pass
             try:
                 smoothed_x[last_rebound:j, :], _, _ = UKF.rts_smoother(Xs=X[last_rebound+1:j+1, :], Ps=covariances[last_rebound+1:j+1, :, :], 
-                                                    Qs=np.stack([getQ(dt=measurements[2, k], sigma_a=0.1) for k in range(last_rebound, j)], axis=0),
+                                                    Qs=np.stack([getQ(dt=measurements[2, k]) for k in range(last_rebound, j)], axis=0),
                                                     dts=measurements[2, last_rebound:j])
             except np.linalg.LinAlgError:
                 print(f"np.linalg.LinAlgError on measure {i}")
@@ -279,7 +287,7 @@ def estimate_trajectory(homog_points1, homog_points2, t_1, t_2, M1, M2, shape1, 
             # Reset UKF
             if j < measurements.shape[1]-1:
                 UKF = Ball_UKF(M1=M1, M2=M2)
-                initialize_UKF(UKF, pos=X[i, :3]) # smoothed_x[j-1, :3])
+                initialize_UKF(UKF, pos=prev_pos) # smoothed_x[j-1, :3])
                 print(f"Estimación inicial: {UKF.x}")
                 last_rebound = j
                 # Reprocess measure (i is not incremented)

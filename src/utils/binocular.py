@@ -117,6 +117,28 @@ def get_fundamental_matrix(M1, M2, C1):
     # F /= F[2, 2]  # Normalize F
     return F
 
+def get_essential_matrix(R1, C1, R2, C2):
+    """
+    Obtener la matriz esencial E a partir de las matrices de rotación R1, R2 y los centros de cámara C1, C2.
+    :param R1: Matriz de rotación de la cámara 1 (3x3)
+    :param C1: Centro de la cámara 1 en coordenadas 3D (3x1)
+    :param R2: Matriz de rotación de la cámara 2 (3x3)
+    :param C2: Centro de la cámara 2 en coordenadas 3D (3x1)
+    :return: Matriz esencial E (3x3)
+    """
+    R = R2 @ R1.T
+    t = -R1.T @ (C2-C1)
+    return skew(t) @ R
+
+def get_fundamental_matrix_from_essential(E, K1, K2):
+    """
+    Obtener la matriz fundamental F a partir de la matriz esencial E y las matrices intrínsecas K1 y K2.
+    :param E: Matriz esencial (3x3)
+    :param K1: Matriz intrínseca de la cámara 1 (3x3)
+    :param K2: Matriz intrínseca de la cámara 2 (3x3)
+    :return: Matriz fundamental F (3x3)
+    """
+    return np.linalg.inv(K2).T @ E @ np.linalg.inv(K1)
 
 def triangulate_ball(homog_points1, homog_points2, M1, M2):
     """

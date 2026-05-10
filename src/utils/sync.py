@@ -334,7 +334,7 @@ def filter_outliers_iqr(x):
     upper_bound = q3 + 1.5 * iqr
     return (x >= lower_bound) & (x <= upper_bound)
 
-def refine_offset(F, homog_points1, homog_points2, offset, fps_ratio=1.0, thres=10, min_points=2, save_correspondences=None):
+def refine_offset(F, homog_points1, homog_points2, offset=0, fps_ratio=1.0, thres=10, min_points=2, save_correspondences=None):
     """
     Refina la estimación del desfase (offset) entre dos secuencias de puntos 2D usando la matriz fundamental F.
     El offset es de la secuencia 1 respecto a la secuencia 2: positivo si la cámara 1 va adelantada respecto a la cámara 2.
@@ -345,7 +345,7 @@ def refine_offset(F, homog_points1, homog_points2, offset, fps_ratio=1.0, thres=
     :param fps_ratio: Ratio de fps entre las dos cámaras (fps2 / fps1).
     :param thres: Número de frames a cada lado para buscar correspondencias locales.
     :param min_points: Número mínimo de puntos válidos para considerar una correspondencia local como válida.
-                       Si no se proporciona, se 2. Como mínimo se tomará 2.
+                       Como mínimo y como valor por defecto se tomará 2.
     :param save_correspondences: Ruta para guardar las correspondencias locales (opcional).
     :return: Nueva estimación del offset (en número de frames) y ratio de fps estimado.
     """
@@ -475,9 +475,9 @@ def refine_offset(F, homog_points1, homog_points2, offset, fps_ratio=1.0, thres=
     if np.sum(valid_mask) < 2:
         return offset  # No hay suficientes puntos para refinar
     inliers = filter_outliers_iqr(local_offset[valid_mask])
-    print(f'{np.sum(inliers)}/{np.sum(valid_mask)} outliers removed')
+    print(f'{np.sum(inliers)}/{np.sum(valid_mask)} inliers filtered')
     A = np.vstack((np.arange(homog_points1.shape[1])[valid_mask][inliers], np.ones(np.sum(inliers)))).T
-    b = local_offset[valid_mask]
+    b = local_offset[valid_mask][inliers]
     x, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
     refined_offset = x[1]
     fps_ratio = x[0]
