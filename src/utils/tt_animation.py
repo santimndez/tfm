@@ -25,11 +25,16 @@ def ball_animation(trajectory, t=None, out=None, fps=60):
     # fig.subplots_adjust(left=0, right=1, bottom=0, top=1) # Ajusta a la ventana
 
     # ANIMACIÓN 2D
-    arrow = ax2d.quiver(0, 0, 0, 0, angles='xy', scale_units='xy', scale=1)
+    arrow = ax2d.quiver(0, 0, 0, 0, angles='xy', scale_units='xy', scale=1, color='blue')
     ax2d.set_xlim(-200, 200)
     ax2d.set_ylim(-200, 200)
     ax2d.set_aspect('equal')
     speed_text = ax2d.text(0.5, 1.05, '', transform=ax2d.transAxes)
+
+    # plot circumference in ax2d
+    for r in np.arange(0, 160, 10):
+        circle = plt.Circle((0, 0), r, color='black' if r % 50 == 0 else 'gray', fill=False, linestyle='dashed')
+        ax2d.add_artist(circle)
 
     # ANIMACIÓN 3D
     # ax.plot(trajectory[0, :], trajectory[1, :], trajectory[2, :], label='Trayectoria de la pelota')
@@ -82,14 +87,16 @@ def ball_animation(trajectory, t=None, out=None, fps=60):
         ball._offsets3d = ([x], [y], [z])
 
         if frame>0 and (bool(trajectory[1, frame]>TABLE_LENGTH/200) ^ bool(trajectory[1, frame-1]>TABLE_LENGTH/200)):
-            spin_x = trajectory[7, frame] / (2*np.pi)
-            spin_y = -trajectory[6, frame] / (2*np.pi)
+            v = trajectory[3:6, frame]
+            w = trajectory[6:9, frame]
+            spin_y, spin_x = w[:2]/(2*np.pi)
+            spin_y *= -1
             arrow.remove()
-            arrow = ax2d.quiver(0, 0, spin_x, spin_y, angles='xy', scale_units='xy', scale=1)
-            speed = np.linalg.norm(trajectory[3:6, frame])
-            speed_text.set_text(f"{speed*3.6:.0f} km/h \n{np.linalg.norm(trajectory[6:9, frame]) / (2*np.pi):.1f} rps")
+            arrow = ax2d.quiver(0, 0, spin_x, spin_y, angles='xy', scale_units='xy', scale=1, color='blue')
+            speed = np.linalg.norm(v)
+            speed_text.set_text(f"{speed*3.6:.0f} km/h \n{np.linalg.norm(w) / (2*np.pi):.1f} rps")
 
-        return ball,arrow, speed_text,
+        # return ball, arrow, speed_text,
 
     ani = FuncAnimation(fig, update, frames=trajectory.shape[1], interval=1000/fps, blit=False, repeat=False)
 

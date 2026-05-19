@@ -2,7 +2,7 @@ import numpy as np
 from filterpy.kalman import UnscentedKalmanFilter, MerweScaledSigmaPoints
 from filterpy.common import Q_continuous_white_noise
 from scipy.integrate import solve_ivp
-
+from scipy.stats import chi2
 from .binocular import triangulate_ball
 
 # Esquinas de la mesa en el sistema de coordenadas de la cámara en cm
@@ -21,6 +21,8 @@ COR = 0.85                   # Coefficient of restitution
 MU = 0.3                     # Friction coefficient
 M = 2.7e-3                   # Ball mass (kg)
 R = BALL_RADIUS / 100        # Ball radius (m)
+
+verbose = False
 
 def get_alpha(v, w, MU=MU, COR=COR, R=R):
     return np.nan_to_num((MU * (1+COR) * np.abs(v[2])) / np.linalg.norm(v[:2]+w[:2]*np.array((-R, R))), nan=0.0)
@@ -163,7 +165,7 @@ def Ball_UKF(M1, M2):
 
 # Predicción de la trayectoria de la pelota usando el UKF Ball_UKF
 
-def getQ(dt, sigma_v=0.1, sigma_w=5.0):
+def getQ(dt, sigma_v=0.1, sigma_w=20.0):
     """
     Genera la matriz de covarianza del proceso Q para el UKF.
     :param dt: Tamaño del paso de tiempo (s)
@@ -188,6 +190,16 @@ def initialize_UKF(UKF, pos=np.array([0.005*TABLE_WIDTH, 0.005*TABLE_LENGTH, 0.0
                      216.0, 216.0, 216.0,   # v: 216 m/s = 60 km/h 
                      100.0, 100.0, 100.0])  # w: 100 rad/s
     UKF.P *= UKF.P # Pasar de desviación típica a varianza
+
+def mahalanobis_from_p_value(p, df=2):
+    """
+    Calcula la distancia de Mahalanobis a partir de un p-valor p, asumiendo observaciones una distribución normal multivariante de dimensión df.
+    Útil para establecer el threshold de detección de rebotes o anomalías en estimate_trajectory.
+    :param p: p-valor, es decir, probabilidad de obtener un valor más extremo que el observado.
+    :param df: grados de libertad de la distribución normal.
+    :return: distancia de Mahalanobis correspondiente.
+    """
+    return np.sqrt(chi2.ppf(1 - p, df=df))
 
 def estimate_trajectory(homog_points1, homog_points2, t_1, t_2, M1, M2, shape1, shape2, mahalanobis_thres=7, min_rebound_lapse=0.07):
     """
@@ -233,7 +245,8 @@ def estimate_trajectory(homog_points1, homog_points2, t_1, t_2, M1, M2, shape1, 
                                M2 if measurements[3, j] else M1)[:3, 0]
         i = j+1
         initialize_UKF(UKF, pos=pos)
-        print(f"Initial estimation\n{measurements[:2, j-1]}, (C{int(measurements[3, j-1]+1)}), {measurements[:2, j]}(C{int(measurements[3, j]+1)})\n{pos}, t={t[j-1]}, {t[j]}")
+        if verbose:
+            print(f"Initial estimation\n{measurements[:2, j-1]}, (C{int(measurements[3, j-1]+1)}), {measurements[:2, j]}(C{int(measurements[3, j]+1)})\n{pos}, t={t[j-1]}, {t[j]}")
     else:
         initialize_UKF(UKF)
     X = np.zeros((measurements.shape[1]+1, UKF.x.shape[0])) # Array of estimations
@@ -256,20 +269,30 @@ def estimate_trajectory(homog_points1, homog_points2, t_1, t_2, M1, M2, shape1, 
         pos = 0.01*triangulate_ball(measurements[:2, j-1:j], measurements[:2, j:j+1], 
                            M2 if measurements[3, j-1] else M1,
                            M2 if measurements[3, j] else M1)[:3, 0]
+        bads = 0 # Bad measurements in current batch in each camera
         for k in range(i, j+1):  # Process batch
             UKF.Q = getQ(dt=measurements[2, k])
             UKF.R = R[int(measurements[3, k])]
             UKF.predict(dt=measurements[2, k])
+            pred_x, pred_P = UKF.x.copy(), UKF.P.copy()
             update(UKF, pos2d=measurements[:2, k], dt=measurements[2, k], M=M2 if measurements[3, k] else M1)
             loglikelihoods[k] = UKF.mahalanobis
+            if UKF.mahalanobis > mahalanobis_thres:  # Discard bad measurements with high mahalanobis
+                UKF.x = pred_x.copy()  # Revert last update
+                UKF.P = pred_P.copy()
+                UKF.x_post = UKF.x.copy()
+                UKF.P_post = UKF.P.copy()
+                bads |= 1+int(measurements[3, k])
             X[k+1, :] = UKF.x.copy()
             covariances[k+1, :, :] = UKF.P.copy()
         # if (((pos[1]-prev_pos[1])*(X[i, 4])<0 or UKF.log_likelihood<loglikelihood_thres) and last_rebound+1 < j) or j==measurements.shape[1]-1:
-        if (((pos[1]-prev_pos[1])*(X[i, 4])<0 or UKF.mahalanobis>mahalanobis_thres) and t[last_rebound] + min_rebound_lapse < t[j]) or j==measurements.shape[1]-1:
+        stroke = (pos[1]-prev_pos[1])*(X[i, 4])<0
+        if ((stroke or (bads & 3)) and t[last_rebound] + min_rebound_lapse < t[j]) or j==measurements.shape[1]-1:
             # Get speed and spin
             rebounds.append(j)
-            print(f"REBOUND\nMeasure: {j}, {measurements[:, j]}\nPosition: {X[j, :3]}\nTime: {t[j]}\nSpeed: {X[j, 3:6]}\nSpin: {X[j, 6:]} ({np.linalg.norm(X[j, 6:])/(2*np.pi)} rps)\nLikelihood: {UKF.mahalanobis}")
-            print(f"Triangulation: {pos}, pos i: {X[i, :3]}, pos i-1: {X[i-1, :3]}")
+            if verbose:
+                print(f"REBOUND\nMeasure: {j}, {measurements[:, j]}\nPosition: {X[j, :3]}\nTime: {t[j]}\nSpeed: {X[j, 3:6]}\nSpin: {X[j, 6:]} ({np.linalg.norm(X[j, 6:])/(2*np.pi)} rps)\nLikelihood: {UKF.mahalanobis}")
+                print(f"Triangulation: {pos}, pos i: {X[i, :3]}, pos i-1: {X[i-1, :3]}")
             # Recalculate trajectory with UKF backward pass
             try:
                 smoothed_x[last_rebound:j, :], _, _ = UKF.rts_smoother(Xs=X[last_rebound+1:j+1, :], Ps=covariances[last_rebound+1:j+1, :, :], 
@@ -288,9 +311,12 @@ def estimate_trajectory(homog_points1, homog_points2, t_1, t_2, M1, M2, shape1, 
             if j < measurements.shape[1]-1:
                 UKF = Ball_UKF(M1=M1, M2=M2)
                 initialize_UKF(UKF, pos=prev_pos) # smoothed_x[j-1, :3])
-                print(f"Estimación inicial: {UKF.x}")
+                if verbose:
+                    print(f"Estimación inicial: {UKF.x}")
                 last_rebound = j
-                # Reprocess measure (i is not incremented)
+                # Reprocess measure (i is not incremented) if a stroke was detected
+                if not stroke:
+                    i = j+1
                 continue
         # bounce_counter = 0
         i = j+1

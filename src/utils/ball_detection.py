@@ -3,31 +3,6 @@ import cv2 as cv
 import pandas as pd
 import os
 
-def draw_trajectory(video_file, positions, output_file):
-    cap = cv.VideoCapture(video_file)
-    fps = cap.get(cv.CAP_PROP_FPS)
-    w = int(cap.get(cv.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv.CAP_PROP_FRAME_HEIGHT))
-    fourcc = cv.VideoWriter_fourcc(*'mp4v')
-    out = cv.VideoWriter(output_file, fourcc, fps, (w, h))
-
-    frame_idx = 0
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        if positions[frame_idx, 2] > 0:
-            x = int(round(positions[frame_idx, 0]))
-            y = int(round(positions[frame_idx, 1]))
-            cv.circle(frame, (x, y), 5, (0, 0, 255), -1)
-
-        out.write(frame)
-        frame_idx += 1
-
-    cap.release()
-    out.release()
-
 def get_ball_positions(video_file, model):
     """ Obtener las posiciones de la pelota en cada frame del vídeo usando el modelo de segmentación.
     Devuelve una matriz de tamaño (num_frames, 3) con las coordenadas homogéneas de la pelota en cada frame
@@ -122,6 +97,117 @@ def save_ball_positions(file_path, positions):
     positions debe ser una matriz de tamaño (num_frames, 3) con las coordenadas homogéneas de la pelota en cada frame.
     """
     pd.DataFrame(positions).to_csv(file_path, index=False, header=None)
+
+def draw_segmentation(video_file, model, output_file):
+    """
+    Dibuja la segmentación de la pelota en cada frame del vídeo y guarda el resultado en un nuevo archivo.
+    :param video_file: Ruta al archivo de vídeo de entrada.
+    :param model: Modelo de segmentación.
+    :param output_file: Ruta al archivo de vídeo de salida.
+    """
+
+    cap = cv.VideoCapture(video_file)
+    w, h = int(cap.get(cv.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv.CAP_PROP_FPS)
+
+    fourcc = cv.VideoWriter_fourcc(*'mp4v')
+    out = cv.VideoWriter(output_file, fourcc, fps, (w, h))
+
+    frame_idx = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # Realizar la segmentación
+        results = model(frame, verbose=False)
+        masks = results[0].masks
+        masks = masks.data.cpu().numpy() if masks is not None else []
+        if len(masks) > 0:
+            # Suponiendo que la pelota es el mayor objeto segmentado
+            mask_idx = np.argmax(np.sum(masks, axis=(1, 2)))
+            mask = masks[mask_idx].squeeze().astype(np.uint8)*255
+            # Redimensionar al tamaño del frame
+            gray_mask = cv.resize(mask, (w, h), interpolation=cv.INTER_NEAREST)
+            green_mask = np.zeros_like(frame)
+            green_mask[:, :, 1] = gray_mask
+            # Superponer la máscara con el frame original
+            frame = cv.addWeighted(frame, 1, green_mask, 0.5, 0)
+        out.write(frame)
+
+        frame_idx += 1
+
+    cap.release()
+    out.release()
+
+def draw_masks(video_file, masks_folder, output_file):
+    """
+    Dibuja la segmentación de la pelota en cada frame del vídeo dadas las máscaras previamente obtenidas y guarda el resultado en un nuevo archivo.
+    :param video_file: Ruta al archivo de vídeo de entrada.
+    :param masks_folder: Ruta a la carpeta con las máscaras de segmentación.
+    :param output_file: Ruta al archivo de vídeo de salida.
+    """
+
+    cap = cv.VideoCapture(video_file)
+    w, h = int(cap.get(cv.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv.CAP_PROP_FPS)
+
+    fourcc = cv.VideoWriter_fourcc(*'mp4v')
+    out = cv.VideoWriter(output_file, fourcc, fps, (w, h))
+
+    frame_idx = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # Obtener la máscara de segmentación
+        mask_file = os.path.join(masks_folder, f"{frame_idx}.png")
+        if os.path.exists(mask_file):
+            mask = cv.imread(mask_file, cv.IMREAD_GRAYSCALE)*255
+            # Redimensionar al tamaño del frame
+            gray_mask = cv.resize(mask, (w, h), interpolation=cv.INTER_NEAREST)
+            green_mask = np.zeros_like(frame)
+            green_mask[:, :, 1] = gray_mask
+            # Superponer la máscara con el frame original
+            frame = cv.addWeighted(frame, 1, green_mask, 0.5, 0)
+        
+        out.write(frame)
+        frame_idx += 1
+
+    cap.release()
+    out.release()
+
+def draw_trajectory(video_file, positions, output_file):
+    """
+    Dibuja la trayectoria de la pelota en el vídeo y guarda el resultado en un nuevo archivo.
+    :param video_file: Ruta al archivo de vídeo de entrada.
+    :param positions: Matriz de posiciones de la pelota en cada frame (N, 3).
+    :param output_file: Ruta al archivo de vídeo de salida.
+    """
+    cap = cv.VideoCapture(video_file)
+    fps = cap.get(cv.CAP_PROP_FPS)
+    w = int(cap.get(cv.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv.CAP_PROP_FRAME_HEIGHT))
+    fourcc = cv.VideoWriter_fourcc(*'mp4v')
+    out = cv.VideoWriter(output_file, fourcc, fps, (w, h))
+
+    frame_idx = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        if positions[frame_idx, 2] > 0:
+            x = int(round(positions[frame_idx, 0]))
+            y = int(round(positions[frame_idx, 1]))
+            cv.circle(frame, (x, y), 5, (0, 0, 255), -1)
+
+        out.write(frame)
+        frame_idx += 1
+
+    cap.release()
+    out.release()
 
 def draw_line(img, homog_line, color=(0, 0, 0), thickness=1, **args):
     """ Dibuja una línea dada en coordenadas homogéneas sobre la imagen. """

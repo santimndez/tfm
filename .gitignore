@@ -1,9 +1,11 @@
 __pycache__/
 *.jpg
-*.txt
 *.mp4
 *.pt
 *.csv
 results/
 src/data/
 .vscode
+output/
+output*
+src/files/segmentation/*

@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-import os
 
 def convert_points(input_file: str, output_file: str) -> None:
     """

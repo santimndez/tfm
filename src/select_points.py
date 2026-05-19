@@ -8,8 +8,8 @@ parser = argparse.ArgumentParser(usage=
 """
 usage: select_points.py [-h] -i INPUT [-f FRAME] [-o OUTPUT] [-a]
 
-Este script permite seleccionar puntos en un frame seleccionado de un vídeo y mostrar sus coordenadas haciendo clic.
-Es útil para obtener las coordenadas de la bola y usarlas para el prompt de SAM2.
+Este programa permite seleccionar puntos en un frame seleccionado de un vídeo y mostrar sus coordenadas haciendo clic.
+Es útil para obtener las coordenadas de las esquinas de la mesa, o también las coordenadas de la bola y usarlas para el prompt de SAM2.
 Controles: 
     - Clic izquierdo: seleccionar punto dentro del contorno (verde)
     - Clic central: seleccionar punto fuera del contorno (rojo)
@@ -26,7 +26,7 @@ Formato del archivo de salida:
 """)
 parser.add_argument("-i", "--input", help="Ruta al vídeo de entrada o carpeta con los frames en formato jpg y nombre 00001.jpg, 00002.jpg, etc.", required=True)
 parser.add_argument("-f", "--frame", help="Frame seleccionado del vídeo", type=int, default=0)
-parser.add_argument("-o", "--output", help="Archivo de salida para guardar los puntos", default='./points.txt')
+parser.add_argument("-o", "--output", help="Archivo de salida para guardar los puntos", default=None)
 parser.add_argument("-a", "--append", help="Añadir al archivo de salida en lugar de sobrescribirlo", action='store_true')
 
 args = parser.parse_args()
@@ -118,7 +118,7 @@ if frame is not None:
         key = cv.waitKey(0)
 
     # Guardar los puntos en un archivo
-    if len(points) > 0:
+    if args.output is not None and len(points) > 0:
         with open(args.output, 'a' if args.append else 'w') as f:
             if not args.append:
                 f.write("frame x y isin\n")

@@ -40,7 +40,7 @@ def get_projection_matrix(refs, points, camera_matrix, dist_coefs, ):
     :param points: puntos de imagen 2D (Nx2)
     :param camera_matrix: matriz de cámara (3x3)
     :param dist_coefs: coeficientes de distorsión (1x5)
-    :return: matriz de proyección (3x4)
+    :return: matriz de proyección (3x4), matriz de rotación (3x3), vector de traslación (3x1), centro de la cámara (3x1)
     """
     ok, rvec, tvec = cv.solvePnP(refs, points, camera_matrix, dist_coefs, flags=cv.SOLVEPNP_IPPE)
     if ok: # Refinamiento

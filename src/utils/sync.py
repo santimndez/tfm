@@ -187,15 +187,18 @@ def estimate_offset_epilines(epilines, homog_points1, homog_points2, max_offset=
     offset_loss = np.zeros((2*max_offset+1,))
     for o in range(-max_offset, max_offset+1):
         # Desplazar las posiciones de la segunda cámara
-        shifted_points = np.roll(homog_points2, o, axis=1)
-
-        # Marcar como no válidos los puntos desplazados fuera del rango (la distancia contará 0)
-        shifted_points[:, :max(0, o)] = 0                           
-        shifted_points[:, shifted_points.shape[1]-max(0, -o):] = 0
+        shifted_points = None
+        if o>0:
+            shifted_points = np.hstack((np.zeros((3, o)), homog_points2[:, :-o]))
+        elif o<0:
+            shifted_points = np.hstack((homog_points2[:, -o:], np.zeros((3, -o))))
+        else:
+            shifted_points = homog_points2
         
         # Suma de las distancias de cada punto a la recta epipolar de la otra cámara proyectada
         offset_loss[max_offset+o] = np.sum(np.abs(np.nan_to_num(distance_point_to_line(shifted_points, epilines), nan=0.0, posinf=0.0, neginf=0.0)))
-        offset_loss[max_offset+o] /= np.sum(epilines[:, 2] * shifted_points[2, :] > 0)  # Normalizar por el número de puntos válidos
+        valid_points = np.sum(homog_points1[2, :] * shifted_points[2, :] > 0)
+        offset_loss[max_offset+o] /= valid_points # Normalizar por el número de puntos válidos
         
     #  Devolver el desfase estimado
     return np.argmin(offset_loss) - max_offset, offset_loss
@@ -213,7 +216,6 @@ def estimate_offset(F, homog_points1, homog_points2, max_offset=600):
     :return: Desfase estimado (en número de frames) y array con la pérdida para cada desfase.
     """
     epilines = (F @ homog_points1).T
-
     return estimate_offset_epilines(epilines, homog_points1, homog_points2, max_offset=max_offset)
 
 def intersect_line_polyline(line, polyline, all=False):
@@ -585,7 +587,7 @@ def refine_offset_timestamps(F, homog_points1, homog_points2, timestamps1, times
             distances = distances[permutation]  # Reordenar las distancias para que los puntos centrales vayan primero
             argmin = np.argmin(distances)
             if distances[argmin]<10:   # Solo considerar la correspondencia si la distancia es pequeña
-                local_offset[idx] =  timestamps2[corr_idx+permutation[argmin]]
+                local_offset[idx] = timestamps2[corr_idx+permutation[argmin]-thres]
             continue
         
         intersection, t = aux
@@ -604,33 +606,20 @@ def refine_offset_timestamps(F, homog_points1, homog_points2, timestamps1, times
         rpos0 = np.sum(rebounds0>0)
         rprev0 = np.sum(rebounds0<0)
         r0 = 1 if 0 in rebounds0 else 0
+        if r0: 
+            count += 1
+            continue
         vt = np.ones_like(t, dtype=bool)
         if len(rebounds0) == len(rebounds1):
             for it in range(t.shape[0]):
                 rpos = np.sum(rebounds1>t[it])
                 rprev = np.sum(rebounds1<=t[it])
-                if (rpos != rpos0+r0 or rprev != rprev0) and (rpos != rpos0 or rprev != rprev0+r0):
+                # if (rpos != rpos0+r0 or rprev != rprev0) and (rpos != rpos0 or rprev != rprev0+r0):
+                if (rpos!=rpos0 or rprev!=rprev0):
                     vt[it] = False
         else:
             count += 1
             continue  # Descartar el frame
-            # for it in range(t.shape[0]): # Si el orden de rebotes en el tiempo es inconsistente, se descarta la intersección
-            #     rpos = np.any(rebounds1>t[it])
-            #     rprev = np.any(rebounds1<t[it])
-            #     if rpos and not rprev \
-            #         and not rpos0 and rprev0+r0:
-            #             vt[it] = False
-            #     if rprev and not rpos \
-            #         and not rprev0 and rpos0+r0:
-            #             vt[it] = False
-            #     if rpos and rprev \
-            #         and ((rpos0+r0 and not rprev0) or (not rpos0 and rprev0+r0)):
-            #             vt[it] = False
-            #     # if not (rpos and rprev):
-            #     #     vt[it] = not ((((rpos0>0) ^ rpos) or ((rprev0>0) ^ rprev)) \
-            #     #         and ((rpos0+r0>0) ^ rpos or ((rprev0>0) ^ rprev)) \
-            #     #         and ((rpos0>0) ^ rpos or ((rprev0+r0>0) ^ rprev)))
-            #     # r0 es un comodín, puede contarse como rebote antes o después del frame actual del vídeo 1 para validar la intersección
         t = t[vt]
         
         if t.shape[0] == 0:  # Se han descartado todas las intersecciones
@@ -667,7 +656,9 @@ def refine_offset_timestamps(F, homog_points1, homog_points2, timestamps1, times
 
     if save_correspondences is not None:
         local_offset[valid_mask] += timestamps1[valid_mask]
-        pd.DataFrame({'frame': np.arange(homog_points1.shape[1]), 'offset': np.searchsorted(timestamps1, local_offset, side='left')}).to_csv(save_correspondences, index=False, na_rep='nan')
+        offset = np.searchsorted(timestamps2, local_offset, side='left').astype(np.float32)
+        offset[~valid_mask] = np.nan
+        pd.DataFrame({'frame': np.arange(homog_points1.shape[1]), 'offset': offset}).to_csv(save_correspondences, index=False, na_rep='nan')
     return refined_offset
 
 def sync_positions(homog_points1, homog_points2, offset, fps_ratio):
